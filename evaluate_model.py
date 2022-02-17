@@ -252,6 +252,18 @@ def evaluate(
     print(scores)
 
 
+# parse bool args correctly, see https://stackoverflow.com/a/43357954
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', default='cuda', type=str, help='device to use')
@@ -259,17 +271,17 @@ def parse_args():
     parser.add_argument('--manual_seed', default=42, type=int, help='initialization of pseudo-RNG')
     parser.add_argument('--batch_size', default=96, type=int, help='batch size')
     parser.add_argument('--clip_model', default= "ViT-B/32", type=str, help="available models = ['RN50', 'RN101', 'RN50x4', 'RN50x16', 'RN50x64', 'ViT-B/32', 'ViT-B/16', 'ViT-L/14']")
-    parser.add_argument('--use_all_vit_features', default=True, type=bool)
+    parser.add_argument('--use_all_vit_features', default=True, type=str2bool)
     parser.add_argument('--language_model_type', default="gpt2", type=str)
     parser.add_argument('--language_model_variant', default="gpt2", type=str, help='gpt2, gpt2-xl')
-    parser.add_argument('--prefix_only', default=False, type=bool)
+    parser.add_argument('--prefix_only', default=False, type=str2bool)
     parser.add_argument('--hf_cache_dir', default=None, type=str)
 
     parser.add_argument('--valid_json_path', default='/data/datasets/coco/annotations/captions_val2017.json', type=str)
     parser.add_argument('--image_folder_path', default='/data/datasets/coco/val2017/', type=str)
 
     parser.add_argument('--checkpoint_path', type=str, default='./out/002_coco2017_gpt2_po_allfeat.ckpt_epoch_4.ckpt')
-    parser.add_argument('--load_pl_checkpoint', default=True, type=bool)
+    parser.add_argument('--load_pl_checkpoint', default=True, type=str2bool)
 
     opt = parser.parse_args()
     return opt
