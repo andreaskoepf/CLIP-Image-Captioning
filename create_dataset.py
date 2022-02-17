@@ -1,4 +1,5 @@
 """ A modified version of clip_inference.py from rom1504/clip-retrieval """
+from unittest import result
 from dataclasses import dataclass
 from torch.utils.data.dataloader import default_collate
 from torch.utils.data import DataLoader, Dataset
@@ -74,9 +75,12 @@ class CocoJsonDataset(Dataset):
 
 
 class CocoImageDataset(Dataset):
+<<<<<<< 68c433d48d67ff26fb039e3503a1dfbe4a5b4899
     """
     Dataset returning image tensors together with image entry objects. Mainly used for evaluating the model.  
     """
+=======
+>>>>>>> add coco eval script
     def __init__(self, annotation_json_path: str, image_folder_path: str, image_transform):
         super().__init__()
         self.annotations = CocoJsonDataset(annotation_json_path)
@@ -141,7 +145,11 @@ class CocoCaptionDataset(Dataset):
         return {
             "image_tensor": image_tensor,
             "tokens": tokens.numpy(),
+<<<<<<< 68c433d48d67ff26fb039e3503a1dfbe4a5b4899
             "image_id": entry.image.id
+=======
+            "entry": entry
+>>>>>>> add coco eval script
         }
 
     @staticmethod
