@@ -1,5 +1,4 @@
 """ A modified version of clip_inference.py from rom1504/clip-retrieval """
-from unittest import result
 from dataclasses import dataclass
 from torch.utils.data.dataloader import default_collate
 from torch.utils.data import DataLoader, Dataset
@@ -134,7 +133,7 @@ class CocoCaptionDataset(Dataset):
         return {
             "image_tensor": image_tensor,
             "tokens": tokens.numpy(),
-            "entry": entry
+            "image_id": entry.image.id
         }
 
     @staticmethod
