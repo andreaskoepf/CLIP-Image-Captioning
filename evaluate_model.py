@@ -1,0 +1,297 @@
+from typing import Union, Tuple, List, Optional
+import inspect
+import argparse
+import json
+from tqdm import tqdm
+
+import torch
+import torch.nn.functional as F
+
+import clip
+from clip.model import VisionTransformer
+from create_dataset import CocoImageDataset
+from model import CLIPCaptionModel, CLIPCaptionPrefixOnly
+from lms import (
+    GPT2, GPT2_Tokenizer,
+    GPTJ, GPTJ_Tokenizer,
+    T0, T0_Tokenizer
+)
+
+from pycocoevalcap.eval import Bleu
+from pycocoevalcap.eval import PTBTokenizer
+
+
+def generate_scores(gts, res):
+    tokenizer = PTBTokenizer()
+
+    gts = tokenizer.tokenize(gts)
+    res = tokenizer.tokenize(res)
+
+    scorers = [
+        (Bleu(4), ["Bleu_1", "Bleu_2", "Bleu_3", "Bleu_4"]),
+        # (Meteor(), "METEOR"),
+        # (Rouge(), "ROUGE_L"),
+        # (Cider(), "CIDEr"),
+        # (Spice(), "SPICE")
+    ]
+
+    output = {}
+    img_output = {}
+
+    for scorer, method in scorers:
+        print('computing {} score...'.format(scorer.method()))
+        score, scores = scorer.compute_score(gts, res)
+        if type(method) != list:
+            method = [method]
+            score = [score]
+            scores = [scores]
+
+        for sc, scs, m in zip(score, scores, method):
+            print("%s: %0.3f" % (m, sc))
+            output[m] = sc
+            for img_id, score in zip(gts.keys(), scs):
+                if type(score) is dict:
+                    score = score['All']['f']
+
+                if img_id not in img_output:
+                    img_output[img_id] = {}
+                img_output[img_id][m] = score
+
+    return output, img_output
+
+
+# From https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
+def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
+    """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
+        Args:
+            logits: logits distribution shape (vocabulary size)
+            top_k >0: keep only top k tokens with highest probability (top-k filtering).
+            top_p >0.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
+                Nucleus filtering is described in Holtzman et al. (http://arxiv.org/abs/1904.09751)
+    """
+    assert logits.dim() == 1  # batch size 1 for now - could be updated for more but the code would be less clear
+    top_k = min(top_k, logits.size(-1))  # Safety check
+    if top_k > 0:
+        # Remove all tokens with a probability less than the last token of the top-k
+        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+        logits[indices_to_remove] = filter_value
+
+    if top_p > 0.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+        # Remove tokens with cumulative probability above the threshold
+        sorted_indices_to_remove = cumulative_probs > top_p
+        # Shift the indices to the right to keep also the first token above the threshold
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+
+        indices_to_remove = sorted_indices[sorted_indices_to_remove]
+        logits[indices_to_remove] = filter_value
+    return logits
+
+
+def repetition_penalty_apply(logits, tokens, penalty):
+    tok_logits = torch.gather(logits, -1, tokens)
+    tok_logits = torch.where(tok_logits < 0, tok_logits * penalty, tok_logits / penalty)
+    logits.scatter_(-1, tokens, tok_logits)
+    return logits
+
+
+def generate_no_beam(
+    model: Union[CLIPCaptionModel, CLIPCaptionPrefixOnly],
+    tokenizer: GPT2_Tokenizer,
+    embeds: torch.Tensor,
+    top_p_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+    text_prefix_tokens: Optional[torch.Tensor] = None,
+    max_decode_length: int = 96,
+    temperature: float = 1.0,
+    stop_token: str = '.',
+    repetition_penalty: float = 1.2,
+):
+
+    stop_token = tokenizer.encode_text(stop_token)[0]
+    generations = []
+
+    with torch.no_grad():
+        if text_prefix_tokens is not None:
+            text_prefix_embed = model.language_model.get_embedding_text(text_prefix_tokens)
+            embeds = torch.cat((embeds, text_prefix_embed), dim=1)
+
+        embeds_init = embeds
+        for top_p in top_p_values:
+            tokens = None
+            embeds = embeds_init
+            for _ in range(max_decode_length):
+                # Get logits from a forward pass
+                outputs = model.language_model.call(inputs_embeds=embeds)
+                logits = outputs.logits
+
+                # Assume batch size of 1
+                assert logits.shape[0] == 1
+                logits = logits[0, -1, :]
+
+                # Apply the repetition penalty
+                if repetition_penalty != 1.0 and tokens is not None:
+                    tokens1 = tokens[0, :] # assuming batch size of 1
+                    logits = repetition_penalty_apply(logits, tokens1, repetition_penalty)
+
+                # Apply temperature and filter
+                logits = logits / (temperature if temperature > 0 else 1.0)
+                logits = top_k_top_p_filtering(logits, top_p=top_p, top_k=0.0)
+
+                # Get the next token and its embedding
+                probabilities = F.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probabilities, 1).unsqueeze(0)
+                next_token_embed = model.language_model.get_embedding_text(next_token)
+
+                if tokens is None:
+                    tokens = next_token
+                else:
+                    tokens = torch.cat((tokens, next_token), dim=1)
+                embeds = torch.cat((embeds, next_token_embed), dim=1)
+                
+                if stop_token == next_token.item():
+                    break
+
+            output_list = list(tokens.squeeze().cpu().numpy())
+            output_text = tokenizer.decode_tokens(output_list)
+        
+            generations.append(output_text)
+    
+    return generations
+
+
+def generate_captions(device, language_model, tokenizer, clip_model, image_tensor, top_p_values=[0.1]):
+    with torch.no_grad():
+        image_tensor = image_tensor.unsqueeze(0).to(device)
+        prefix = clip_model.encode_image(image_tensor).float()
+        prefix_embed = language_model.clip_project(prefix)
+    generated_captions = generate_no_beam(language_model, tokenizer, prefix_embed, top_p_values, text_prefix_tokens=None)
+    return generated_captions
+
+
+def evaluate(
+    device: torch.device,
+    checkpoint_path: str,
+    clip_model: str, 
+    use_all_vit_features: bool, 
+    language_model_type: str, 
+    language_model_variant: str, 
+    prefix_only: bool, 
+    valid_json_path: str,
+    image_folder_path: str,
+    hf_cache_dir: Optional[str] = None,
+):
+    max_token_length = 128
+
+    print(f"loading CLIP: '{clip_model}'")
+    clip_model, preprocess = clip.load(clip_model, device=device, jit=False)
+
+    if use_all_vit_features:
+        # original: https://github.com/openai/CLIP/blob/40f5484c1c74edd83cb9cf687c6ab92b28d8b656/clip/model.py#L202-L236
+        def vit_forward_patch(self, x: torch.Tensor):
+            x = self.conv1(x)  # shape = [*, width, grid, grid]
+            x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+            x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+            x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+            x = x + self.positional_embedding.to(x.dtype)
+            x = self.ln_pre(x)
+
+            x = x.permute(1, 0, 2)  # NLD -> LND
+            x = self.transformer(x)
+            x = x.permute(1, 0, 2)  # LND -> NLD
+
+            # this patch removes the CLS token output extraction + projection from CLIP's ViT forward method
+            #x = self.ln_post(x[:, 0, :])
+
+            if self.proj is not None:
+                x = x @ self.proj
+
+            return x
+
+        clip_model.visual.forward = vit_forward_patch.__get__(clip_model.visual, VisionTransformer)
+
+    print(f"loading LM variant: '{language_model_variant}'")
+    if language_model_type == "gpt2":
+        language_model = GPT2.create(language_model_variant, cache_dir=hf_cache_dir)
+        tokenizer = GPT2_Tokenizer.create(language_model_variant, cache_dir=hf_cache_dir)
+    elif language_model_type in ("gptj", "gpt-j"):
+        language_model = GPTJ.create(language_model_variant, cache_dir=hf_cache_dir)
+        tokenizer = GPTJ_Tokenizer.create(language_model_variant, cache_dir=hf_cache_dir)
+    elif language_model_type in ("t0", "t5"):
+        language_model = T0.create(language_model_variant, cache_dir=hf_cache_dir)
+        tokenizer = T0_Tokenizer.create(language_model_variant, cache_dir=hf_cache_dir)
+    else:
+        raise ValueError(f"invalid language model type '{language_model_type}' (expected 'gpt-j' / 'gpt2' / 't0' / 't5')")
+
+    dataset = CocoImageDataset(annotation_json_path=valid_json_path, image_folder_path=image_folder_path, image_transform=preprocess)
+    gt_captions_by_image_id = dataset.annotations.get_captions_by_image_id()    
+
+    if prefix_only:
+        language_model = CLIPCaptionPrefixOnly.load_from_checkpoint(checkpoint_path=checkpoint_path, language_model=language_model, strict=False)
+    else:
+        language_model = CLIPCaptionModel.load_from_checkpoint(checkpoint_path=checkpoint_path, language_model=language_model, strict=False)
+
+    language_model.to(device)
+    language_model.eval()
+
+    ground_truth_captions = {}
+    caption_hypo = {}
+
+    for x in tqdm(dataset, desc='inference'):
+        image_tensor = x['image_tensor']
+        image_entry = x['image_entry']
+        caption = generate_captions(device, language_model, tokenizer, clip_model, image_tensor, top_p_values=[0.1])[0]
+        caption_hypo[image_entry.id] = [{'caption': caption}]
+        ground_truth_captions[image_entry.id] = [{'caption': caption} for caption in gt_captions_by_image_id[image_entry.id]]
+
+    # Calculate scores
+    scores, img_scores = generate_scores(ground_truth_captions, caption_hypo)
+    print("Scores")
+    print(scores)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--device', default='cuda', type=str, help='device to use')
+    parser.add_argument('--device-index', default=0, type=int, help='device index')
+    parser.add_argument('--manual_seed', default=42, type=int, help='initialization of pseudo-RNG')
+    parser.add_argument('--batch_size', default=96, type=int, help='batch size')
+    parser.add_argument('--clip_model', default= "ViT-B/32", type=str, help="available models = ['RN50', 'RN101', 'RN50x4', 'RN50x16', 'RN50x64', 'ViT-B/32', 'ViT-B/16', 'ViT-L/14']")
+    parser.add_argument('--use_all_vit_features', default=True, type=bool)
+    parser.add_argument('--language_model_type', default="gpt2", type=str)
+    parser.add_argument('--language_model_variant', default="gpt2", type=str, help='gpt2, gpt2-xl')
+    parser.add_argument('--prefix_only', default=False, type=bool)
+    parser.add_argument('--hf_cache_dir', default=None, type=str)
+
+    parser.add_argument('--valid_json_path', default='/data/datasets/coco/annotations/captions_val2017.json', type=str)
+    parser.add_argument('--image_folder_path', default='/data/datasets/coco/val2017/', type=str)
+
+    parser.add_argument('--checkpoint_path', type=str, default='./out/002_coco2017_gpt2_po_allfeat.ckpt_epoch_4.ckpt')
+    parser.add_argument('--load_pl_checkpoint', default=True, type=bool)
+
+    opt = parser.parse_args()
+    return opt
+
+
+def main():
+    print('Using pytorch version {}'.format(torch.__version__))
+
+    opt = parse_args()
+    print('Command line args:', opt)
+
+    device = torch.device(opt.device, opt.device_index)
+    print('Device:', device)
+    
+    def merge_args(fn, args, **kwargs):
+        a = {k: args[k] for k in inspect.signature(fn).parameters if k in args}
+        for k,v in kwargs.items():
+            a[k] = v
+        return a
+
+    evaluate(**merge_args(evaluate, vars(opt), device=device))
+
+
+if __name__ == '__main__':
+    main()

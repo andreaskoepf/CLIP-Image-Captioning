@@ -1,4 +1,5 @@
 """ A modified version of clip_inference.py from rom1504/clip-retrieval """
+from unittest import result
 from dataclasses import dataclass
 from torch.utils.data.dataloader import default_collate
 from torch.utils.data import DataLoader, Dataset
@@ -19,10 +20,16 @@ import io
 
 
 @dataclass
-class CocoJsonEntry:
+class CocoJsonImageEntry:
+    id: str
+    file_name: str
+    url: str
+
+
+@dataclass
+class CocoJsonCaptionEntry:
     caption: str
-    image_file_name: str
-    image_url: str
+    image: CocoJsonImageEntry
 
 
 class CocoJsonDataset(Dataset):
@@ -35,10 +42,19 @@ class CocoJsonDataset(Dataset):
         images = j["images"]
         image_by_id = dict()
         for img in images:
-            image_by_id[img['id']] = img
+            image_by_id[img['id']] = CocoJsonImageEntry(id=img['id'], file_name=img['file_name'], url=img['coco_url'])
         self.image_by_id = image_by_id
         self.annotations = j["annotations"]
-        print('annot:', len(self.annotations))
+        print(f'total annotations: {len(self.annotations)}; total images: {len(image_by_id)};')
+
+    def get_captions_by_image_id(self):
+        captions = {}
+        for entry in self:
+            if entry.image.id in captions:
+                captions[entry.image.id].append(entry.caption)
+            else:
+                captions[entry.image.id] = [entry.caption]
+        return captions
 
     def __len__(self):
         return len(self.annotations)
@@ -48,22 +64,45 @@ class CocoJsonDataset(Dataset):
 
         caption = a['caption']
         image_id = a['image_id']
-
         image = self.image_by_id[image_id]
-        image_file_name = image['file_name']
-        image_url = image['coco_url']
 
-        return CocoJsonEntry(caption=caption, image_file_name=image_file_name, image_url=image_url)
+        return CocoJsonCaptionEntry(caption=caption, image=image)
 
-    
+
+class CocoImageDataset(Dataset):
+    def __init__(self, annotation_json_path: str, image_folder_path: str, image_transform):
+        super().__init__()
+        self.annotations = CocoJsonDataset(annotation_json_path)
+        self.keys = list(self.annotations.image_by_id.keys())
+        self.image_folder_path = Path(image_folder_path)
+        self.image_transform = image_transform
+
+    def __len__(self):
+        return len(self.keys)
+
+    def __getitem__(self, index):
+        image_entry = self.annotations.image_by_id[self.keys[index]]
+        image_path = self.image_folder_path / image_entry.file_name
+
+        try:
+            image_tensor = self.image_transform(Image.open(image_path))
+        except (UnidentifiedImageError, OSError):
+            print(f"Failed to load image '{image_path}'. Skipping.")
+            return None  # return None to be filtered in the batch collate_fn
+
+        return {
+            "image_tensor": image_tensor,
+            "image_entry": image_entry
+        }
+
+
 class CocoCaptionDataset(Dataset):
     def __init__(self, annotation_json_path: str, image_folder_path: str, tokenizer, image_transform, max_token_length: int = 128):
         super().__init__()
         self.annotations = CocoJsonDataset(annotation_json_path)
         self.image_folder_path = Path(image_folder_path)
-
-        self.tokenizer = tokenizer
         self.image_transform = image_transform
+        self.tokenizer = tokenizer
         self.max_token_length = max_token_length
 
     def __len__(self):
@@ -73,7 +112,7 @@ class CocoCaptionDataset(Dataset):
         entry = self.annotations[index]
 
         caption = entry.caption
-        image_path = self.image_folder_path / entry.image_file_name
+        image_path = self.image_folder_path / entry.image.file_name
 
         try:
             image_tensor = self.image_transform(Image.open(image_path))
@@ -94,7 +133,8 @@ class CocoCaptionDataset(Dataset):
         
         return {
             "image_tensor": image_tensor,
-            "tokens": tokens.numpy()
+            "tokens": tokens.numpy(),
+            "entry": entry
         }
 
     @staticmethod
