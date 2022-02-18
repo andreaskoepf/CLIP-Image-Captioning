@@ -9,7 +9,7 @@ from layers import TransformerMapper, TransformerMapperAllFeatures
 from lms import GPT2, GPTJ, T0
 
 class CLIPCaptionModel(pl.LightningModule):
-    def __init__(self, language_model: Union[GPT2, GPTJ, T0], **kwargs):
+    def __init__(self, language_model: Union[GPT2, GPTJ, T0], encode_image, **kwargs):
         super().__init__()
 
         # Save hparams (see `train.py` for arguments).
@@ -17,6 +17,8 @@ class CLIPCaptionModel(pl.LightningModule):
 
         self.language_model = language_model
         self.lm_embedding_size = self.language_model.get_embedding_size()
+
+        self.encode_image = encode_image
 
         if self.hparams.use_all_vit_features:
             print('Using all ViT features.')
@@ -100,11 +102,17 @@ class CLIPCaptionModel(pl.LightningModule):
         `batch` contains a tuple of the caption's tokens, attention mask and the CLIP embedding (prefix). [see `dataset.py`]
         """
 
-        tokens, prefix = batch
+        image_tensor = batch["image_tensor"]
+        tokens = batch["tokens"]
+        #image_id = batch["image_id"]
+
+        prefix = self.encode_image(image_tensor)
+
+        #tokens, prefix = batch
 
         # Fix for custom dataloader.
-        tokens = tokens.squeeze(0)
-        prefix = prefix.squeeze(0)[:, 1:]
+        #tokens = tokens.squeeze(0)
+        #prefix = prefix.squeeze(0)[:, 1:]
 
         mask = tokens.ge(0)  # mask is zero where we out of sequence
         tokens[~mask] = 0

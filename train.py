@@ -3,11 +3,15 @@ import pytorch_lightning as pl
 from typing import Optional
 from pathlib import Path
 import torch
+from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
 import fire
 
 from dataset import TokenPrefixDataset, MultiplePrefixDataset
 from model import CLIPCaptionModel, CLIPCaptionPrefixOnly
 from lms import GPT2, GPTJ, T0
+
+from create_dataset import CocoCaptionDataset
 
 
 class CheckpointSaver(pl.Callback):
@@ -40,7 +44,10 @@ class CheckpointSaver(pl.Callback):
 
 
 def train(
-    data_dir: str = "./train/",
+    input_dataset: str,
+    image_folder_path: str,
+    max_token_length: int = 96,
+    #data_dir: str = "./train/",
     output_dir: str = "./models/",
     output_name_prefix: str = "demo_model.ckpt",
     epochs: int = 3,
@@ -53,7 +60,9 @@ def train(
     pos_embeddings: bool = False,        # learn position embedding in mapping transformer
     language_model_type = "gpt2",
     language_model_variant = "gpt2-xl",
-    batch_size: int = 256,
+    visual_encoder_type: str = 'BLIP',  # BLIP or CLIP
+    visual_encoder_model_variant: str = 'ViT-B',
+    batch_size: int = 16,
     optimizer_lr: float = 2e-5,
     prefix_only: bool = False,
     use_all_vit_features: bool = True,
@@ -73,25 +82,65 @@ def train(
     print(f'Using pytorch version {torch.__version__}')
     print('Args: ', locals())
 
-    # Prepare training datasets.
-    if merge_datasets:
-        data_dirs = data_dir.split(",")
+    # Easier to use GPU args. `-1` = use all, `0` = use gpu 0, `0,1` = use gpus 1 and 2 etc.
+    if isinstance(gpu_devices, str):
+        gpu_devices = [int(x) for x in gpu_devices.split(',')]
+    elif isinstance(gpu_devices, int) and gpu_devices != -1:
+        gpu_devices = [gpu_devices]
+    if gpu_devices[0] == -1:
+        gpu_devices = -1
 
-        if len(data_dirs) < 2:
-            raise ValueError(
-                "--merge_datasets was enabled, but less than 2 directories were specified.\n"
-                "You can specify more than one data directory by comma seperating the --data_dir input."
-            )
-        
-        datasets = []
-        for dir in data_dirs:
-            datasets.append(
-                TokenPrefixDataset(dir, batch_size=batch_size, normalize_prefix=normalize_prefix)
-            )
-        
-        dataset = MultiplePrefixDataset(*datasets)
+    if visual_encoder_type == 'BLIP':
+        if visual_encoder_model_variant == 'ViT-B':
+            blip_model_url = 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model*_base_caption.pth'
+        else:
+            raise RuntimeError('Visual encoder model variant not supported: \'{visual_encoder_model_variant}\'')
+
+        image_size = 384
+        preprocess = transforms.Compose([
+            transforms.Resize((image_size,image_size), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+        ])
+
+        from BLIP.models.blip import blip_decoder
+
+        blip_model = blip_decoder(pretrained=blip_model_url, image_size=image_size, vit='base', med_config='BLIP/configs/med_config.json')
+        blip_model.eval()
+
+        device = torch.device('cuda', max(gpu_devices if isinstance(gpu_devices, int) else gpu_devices[0], 0))
+        blip_model = blip_model.to(device)
+
+        def blip_encode(image):
+            with torch.no_grad():
+                return blip_model.visual_encoder(image)
+
+        encode_image = blip_encode
     else:
-        dataset = TokenPrefixDataset(data_dir, batch_size=batch_size, normalize_prefix=normalize_prefix)
+        raise RuntimeError('Unsupported visual encdore \'{visual_encoder_type}\' specified.')
+
+    tokenizer = CocoCaptionDataset.create_tokenizer(tokenizer_model_type=language_model_type, tokenizer_model_variant=language_model_variant)
+    dataset = CocoCaptionDataset(annotation_json_path=input_dataset, image_folder_path=image_folder_path, image_transform=preprocess, tokenizer=tokenizer, max_token_length=max_token_length)
+
+    # # Prepare training datasets.
+    # if merge_datasets:
+    #     data_dirs = data_dir.split(",")
+
+    #     if len(data_dirs) < 2:
+    #         raise ValueError(
+    #             "--merge_datasets was enabled, but less than 2 directories were specified.\n"
+    #             "You can specify more than one data directory by comma seperating the --data_dir input."
+    #         )
+        
+    #     datasets = []
+    #     for dir in data_dirs:
+    #         datasets.append(
+    #             TokenPrefixDataset(dir, batch_size=batch_size, normalize_prefix=normalize_prefix)
+    #         )
+        
+    #     dataset = MultiplePrefixDataset(*datasets)
+    # else:
+    #     dataset = TokenPrefixDataset(data_dir, batch_size=batch_size, normalize_prefix=normalize_prefix)
 
     # TODO find better solution for using `get_linear_schedule_with_warmup` with PL.
     total_steps = len(dataset) * epochs # batch size is already accounted for in `len(dataset)`
@@ -126,15 +175,11 @@ def train(
         for param in language_model.parameters():
             param.requires_grad = False 
 
-        model = CLIPCaptionPrefixOnly(language_model, **model_kwargs)
+        model = CLIPCaptionPrefixOnly(language_model, encode_image, **model_kwargs)
         print("Train only Prefix.")
     else:
-        model = CLIPCaptionModel(language_model, **model_kwargs)
+        model = CLIPCaptionModel(language_model, encode_image, **model_kwargs)
         print("Train both Prefix and Language Model.")
-
-    # Easier to use GPU args. `-1` = use all, `0` = use gpu 0, `0,1` = use gpus 1 and 2 etc.
-    if isinstance(gpu_devices, int) and gpu_devices != -1:
-        gpu_devices = [gpu_devices]
     
     # Create `CheckpointSaver` as a trainer callback instance.
     checkpoint_saver = CheckpointSaver(
@@ -154,7 +199,7 @@ def train(
     # TODO better dataset implementation
     # - Improve dataloader system (batch_size=1 is a temporary fix)
     # - Speed up streaming (multiple workers and/or prepare data ahead of retrieval)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     # Create trainer class.
     trainer = pl.Trainer(
