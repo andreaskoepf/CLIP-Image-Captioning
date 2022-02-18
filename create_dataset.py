@@ -32,6 +32,11 @@ class CocoJsonCaptionEntry:
 
 
 class CocoJsonDataset(Dataset):
+    """
+    Non-standard dataset providing CocoJsonCaptionEntry objects. It is not used directly but aggregated by
+    other Dataset classes (CocoImageDataset, CocoCaptionDataset) to access COCO captions read from the COCO
+    json annotation files.
+    """
     def __init__(self, annotation_json_path):
         super().__init__()
 
@@ -69,6 +74,9 @@ class CocoJsonDataset(Dataset):
 
 
 class CocoImageDataset(Dataset):
+    """
+    Dataset returning image tensors together with image entry objects. Mainly used for evaluating the model.  
+    """
     def __init__(self, annotation_json_path: str, image_folder_path: str, image_transform):
         super().__init__()
         self.annotations = CocoJsonDataset(annotation_json_path)
@@ -483,7 +491,7 @@ def preprocess_dataset(
         num_workers=num_prepro_workers,
         pin_memory=True,
         prefetch_factor=2,
-        collate_fn=collate_fn if input_format == "files" else None,
+        collate_fn=collate_fn if input_format in ("files", "coco_json") else None,
     )
     output_sink = OutputSink(output_folder, write_batch_size)
 
