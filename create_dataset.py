@@ -74,12 +74,9 @@ class CocoJsonDataset(Dataset):
 
 
 class CocoImageDataset(Dataset):
-<<<<<<< 68c433d48d67ff26fb039e3503a1dfbe4a5b4899
     """
     Dataset returning image tensors together with image entry objects. Mainly used for evaluating the model.  
     """
-=======
->>>>>>> add coco eval script
     def __init__(self, annotation_json_path: str, image_folder_path: str, image_transform):
         super().__init__()
         self.annotations = CocoJsonDataset(annotation_json_path)
@@ -144,15 +141,7 @@ class CocoCaptionDataset(Dataset):
         return {
             "image_tensor": image_tensor,
             "tokens": tokens.numpy(),
-<<<<<<< 380cded006852f203ef4952a37e196a93ceabeda
-<<<<<<< 68c433d48d67ff26fb039e3503a1dfbe4a5b4899
             "image_id": entry.image.id
-=======
-            "entry": entry
->>>>>>> add coco eval script
-=======
-            "image_id": entry.image.id
->>>>>>> DataLoader does not like custom objects
         }
 
     @staticmethod

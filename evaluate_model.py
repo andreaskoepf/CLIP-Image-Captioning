@@ -162,12 +162,114 @@ def generate_no_beam(
     return generations
 
 
+
+def generate_hill(
+    device,
+    clip_embedding,
+    model: Union[CLIPCaptionModel, CLIPCaptionPrefixOnly],
+    clip_model,
+    tokenizer: GPT2_Tokenizer,
+    embeds: torch.Tensor,
+    top_p_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+    text_prefix_tokens: Optional[torch.Tensor] = None,
+    max_decode_length: int = 96,
+    temperature: float = 1.0,
+    stop_token: str = '.',
+    repetition_penalty: float = 1.2,
+):
+
+    if clip_embedding.dim() == 3 and clip_embedding.shape[-2] > 1:
+         clip_embedding = clip_embedding[:,0,:]
+    print('clip_embedding', clip_embedding.shape)
+
+    stop_token = tokenizer.encode_text(stop_token)[0]
+    generations = []
+
+    def generate_next(look_ahead, embeds, tokens, top_p):
+        stop = False
+        for _ in range(look_ahead):
+    
+            # Get logits from a forward pass
+            outputs = model.language_model.call(inputs_embeds=embeds)
+            logits = outputs.logits
+
+            # Assume batch size of 1
+            assert logits.shape[0] == 1
+            logits = logits[0, -1, :]
+
+            # Apply the repetition penalty
+            if repetition_penalty != 1.0 and tokens is not None:
+                tokens1 = tokens[0, :] # assuming batch size of 1
+                logits = repetition_penalty_apply(logits, tokens1, repetition_penalty)
+
+            # Apply temperature and filter
+            logits = logits / (temperature if temperature > 0 else 1.0)
+            logits = top_k_top_p_filtering(logits, top_p=top_p, top_k=0.0)
+
+            # Get the next token and its embedding
+            probabilities = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probabilities, 1).unsqueeze(0)
+            next_token_embed = model.language_model.get_embedding_text(next_token)
+
+            if tokens is None:
+                tokens = next_token
+            else:
+                tokens = torch.cat((tokens, next_token), dim=1)
+            embeds = torch.cat((embeds, next_token_embed), dim=1)
+            
+            if stop_token == next_token.item():
+                stop = True
+                break
+        
+        return tokens, embeds, stop
+
+
+    with torch.no_grad():
+        if text_prefix_tokens is not None:
+            text_prefix_embed = model.language_model.get_embedding_text(text_prefix_tokens)
+            embeds = torch.cat((embeds, text_prefix_embed), dim=1)
+
+        tokens = None
+        stride = 5
+        samples_per_run = 256
+
+        for j in range(10):
+            candidates = []
+
+            for i in range(samples_per_run):
+                candidates.append(generate_next(look_ahead=stride, embeds=embeds.clone(), tokens=tokens.clone() if tokens is not None else None, top_p=0.6))
+            candidate_texts = [tokenizer.decode_tokens(c[0].squeeze().tolist()) for c in candidates]
+            #print(candidate_texts)
+            
+            # encode all candidate texts with clip
+            candidate_clip_tokens = clip.tokenize(candidate_texts).to(device)
+            candidate_clip_embeddings = clip_model.encode_text(candidate_clip_tokens).float()
+
+            similarities = clip_embedding @ candidate_clip_embeddings.T
+
+            best = similarities.argmax()
+            print('best', candidate_texts[best])
+
+            tokens, embeds, stop = candidates[best]
+            if stop:
+                break
+
+        output_list = list(tokens.squeeze().cpu().numpy())
+        output_text = tokenizer.decode_tokens(output_list)
+        print('output_text', output_text)
+        
+        generations.append(output_text)
+    
+    return generations
+
+
 def generate_captions(device, language_model, tokenizer, clip_model, image_tensor, top_p_values=[0.1]):
     with torch.no_grad():
         image_tensor = image_tensor.unsqueeze(0).to(device)
         prefix = clip_model.encode_image(image_tensor).float()
         prefix_embed = language_model.clip_project(prefix)
-    generated_captions = generate_no_beam(language_model, tokenizer, prefix_embed, top_p_values, text_prefix_tokens=None)
+    #generated_captions = generate_no_beam(language_model, tokenizer, prefix_embed, top_p_values, text_prefix_tokens=None)
+    generated_captions = generate_hill(device, prefix, language_model, clip_model, tokenizer, prefix_embed, top_p_values)
     return generated_captions
 
 
@@ -242,6 +344,7 @@ def evaluate(
     for x in tqdm(dataset, desc='inference'):
         image_tensor = x['image_tensor']
         image_entry = x['image_entry']
+        print('image-url: ', image_entry.url)
         caption = generate_captions(device, language_model, tokenizer, clip_model, image_tensor, top_p_values=[0.1])[0]
         caption_hypo[image_entry.id] = [{'caption': caption}]
         ground_truth_captions[image_entry.id] = [{'caption': caption} for caption in gt_captions_by_image_id[image_entry.id]]
