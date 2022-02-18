@@ -94,7 +94,7 @@ class CocoImageDataset(Dataset):
         image_path = self.image_folder_path / image_entry.file_name
 
         try:
-            image_tensor = self.image_transform(Image.open(image_path).convert('rgb'))
+            image_tensor = self.image_transform(Image.open(image_path).convert('RGB'))
         except (UnidentifiedImageError, OSError):
             print(f"Failed to load image '{image_path}'. Skipping.")
             return None  # return None to be filtered in the batch collate_fn
@@ -124,7 +124,7 @@ class CocoCaptionDataset(Dataset):
         image_path = self.image_folder_path / entry.image.file_name
 
         try:
-            image_tensor = self.image_transform(Image.open(image_path))
+            image_tensor = self.image_transform(Image.open(image_path).convert('RGB'))
         except (UnidentifiedImageError, OSError):
             print(f"Failed to load image '{image_path}'. Skipping.")
             return None  # return None to be filtered in the batch collate_fn
@@ -226,7 +226,7 @@ class FileFolderDataset(Dataset):
 
         try:
             image_file = self.image_files[key]
-            image_tensor = self.image_transform(Image.open(image_file))
+            image_tensor = self.image_transform(Image.open(image_file).convert('RGB'))
         except (UnidentifiedImageError, OSError):
             print(f"Failed to load image {image_file}. Skipping.")
             return None  # return None to be filtered in the batch collate_fn
@@ -296,7 +296,7 @@ def create_webdataset(
         output = {}
 
         image_data = item[image_key]
-        image = Image.open(io.BytesIO(image_data))
+        image = Image.open(io.BytesIO(image_data)).convert('RGB')
         image_tensor = image_transform(image)
         output["image_tensor"] = image_tensor
 
