@@ -11,6 +11,8 @@ import pandas as pd
 import numpy as np
 import fsspec
 import torch
+from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
 import clip
 import json
 import tqdm
@@ -77,7 +79,7 @@ class CocoImageDataset(Dataset):
     """
     Dataset returning image tensors together with image entry objects. Mainly used for evaluating the model.  
     """
-    def __init__(self, annotation_json_path: str, image_folder_path: str, image_transform):
+    def __init__(self, annotation_json_path: str, image_folder_path: str, image_s):
         super().__init__()
         self.annotations = CocoJsonDataset(annotation_json_path)
         self.keys = list(self.annotations.image_by_id.keys())
@@ -92,7 +94,7 @@ class CocoImageDataset(Dataset):
         image_path = self.image_folder_path / image_entry.file_name
 
         try:
-            image_tensor = self.image_transform(Image.open(image_path))
+            image_tensor = self.image_transform(Image.open(image_path).convert('rgb'))
         except (UnidentifiedImageError, OSError):
             print(f"Failed to load image '{image_path}'. Skipping.")
             return None  # return None to be filtered in the batch collate_fn
@@ -418,6 +420,8 @@ def preprocess_dataset(
     wds_caption_key: Optional[str] = None,
     wds_caption_in_metadata: bool = False,
     wds_vqa_question_key: Optional[str] = None,
+    visual_encoder_type: str = 'BLIP',  # BLIP or CLIP
+    visual_encoder_model_variant: str = 'ViT-B',
     clip_model: str = "ViT-B/32",
     tokenizer_model_type: str = "gpt2",
     tokenizer_model_variant: str = "gpt2-xl",
@@ -426,33 +430,61 @@ def preprocess_dataset(
     device: str = "cuda:0",
     image_folder_path: str = None
 ):
+    encode_image = None
 
-    model, preprocess = clip.load(clip_model, device=device, jit=False)
+    if visual_encoder_type == 'CLIP':
+        model, preprocess = clip.load(clip_model, device=device, jit=False)
 
-    if use_all_vit_features:
-        def vit_forward_patch(self, x: torch.Tensor):
-            x = self.conv1(x)  # shape = [*, width, grid, grid]
-            x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
-            x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
-            x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
-            x = x + self.positional_embedding.to(x.dtype)
-            x = self.ln_pre(x)
+        if use_all_vit_features:
+            def vit_forward_patch(self, x: torch.Tensor):
+                x = self.conv1(x)  # shape = [*, width, grid, grid]
+                x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+                x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+                x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+                x = x + self.positional_embedding.to(x.dtype)
+                x = self.ln_pre(x)
 
-            x = x.permute(1, 0, 2)  # NLD -> LND
-            x = self.transformer(x)
-            x = x.permute(1, 0, 2)  # LND -> NLD
+                x = x.permute(1, 0, 2)  # NLD -> LND
+                x = self.transformer(x)
+                x = x.permute(1, 0, 2)  # LND -> NLD
 
-            # this patch removes the CLS token output extraction + projection from CLIP's ViT forward method
-            # original: https://github.com/openai/CLIP/blob/40f5484c1c74edd83cb9cf687c6ab92b28d8b656/clip/model.py#L202-L236
+                # this patch removes the CLS token output extraction + projection from CLIP's ViT forward method
+                # original: https://github.com/openai/CLIP/blob/40f5484c1c74edd83cb9cf687c6ab92b28d8b656/clip/model.py#L202-L236
 
-            #x = self.ln_post(x[:, 0, :])
+                #x = self.ln_post(x[:, 0, :])
 
-            if self.proj is not None:
-                x = x @ self.proj
+                if self.proj is not None:
+                    x = x @ self.proj
 
-            return x
+                return x
 
-        model.visual.forward = vit_forward_patch.__get__(model.visual, VisionTransformer)
+            model.visual.forward = vit_forward_patch.__get__(model.visual, VisionTransformer)
+        
+        encode_image = lambda img: model.encode_image(img)
+
+    elif visual_encoder_type == 'BLIP':
+        if visual_encoder_model_variant == 'ViT-B':
+            blip_url = 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model*_base_caption.pth'
+        else:
+            raise RuntimeError('Visual encoder model variant not supported: \'{visual_encoder_model_variant}\'')
+
+        image_size = 384
+        preprocess = transforms.Compose([
+            transforms.Resize((image_size,image_size),interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+        ])
+
+        from BLIP.models.blip import blip_decoder
+
+        model_url = visual_encoder_model_variant
+        model = blip_decoder(pretrained=model_url, image_size=image_size, vit='base', med_config='BLIP/configs/med_config.json')
+        model.eval()
+        model = model.to(device)
+
+        encode_image = lambda img: model.visual_encoder(img)
+    else:
+        raise RuntimeError('Unsupported visual encdore \'{visual_encoder_type}\' specified.')
 
     if input_format == "files":
         dataset = FileFolderDataset(
@@ -499,9 +531,8 @@ def preprocess_dataset(
     bar = tqdm.tqdm()
     for items in data:
         with torch.no_grad():
-            image_embs = model.encode_image(
-                items["image_tensor"].to(device)
-            ).cpu().numpy()
+            image = items["image_tensor"].to(device)
+            image_embs = encode_image(image).cpu().numpy()
 
             tokens = items["tokens"]
 
