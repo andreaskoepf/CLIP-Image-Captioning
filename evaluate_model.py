@@ -2,10 +2,15 @@ from typing import Union, Tuple, List, Optional
 import inspect
 import argparse
 import json
+import glob
 from tqdm import tqdm
+
 
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.dataloader import default_collate
+from PIL import Image
 
 import clip
 from clip.model import VisionTransformer
@@ -162,7 +167,7 @@ def generate_no_beam(
     return generations
 
 
-
+@torch.no_grad()
 def generate_hill(
     device,
     clip_embedding,
@@ -170,12 +175,14 @@ def generate_hill(
     clip_model,
     tokenizer: GPT2_Tokenizer,
     embeds: torch.Tensor,
-    top_p_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
     text_prefix_tokens: Optional[torch.Tensor] = None,
-    max_decode_length: int = 96,
+    max_decode_length: int = 70,
     temperature: float = 1.0,
     stop_token: str = '.',
     repetition_penalty: float = 1.2,
+    look_ahead = 4,
+    branching_factor = 3,
+    step_by_step = False
 ):
 
     if clip_embedding.dim() == 3 and clip_embedding.shape[-2] > 1:
@@ -185,92 +192,109 @@ def generate_hill(
     stop_token = tokenizer.encode_text(stop_token)[0]
     generations = []
 
-    def generate_next(look_ahead, embeds, tokens, top_p):
-        stop = False
-        for _ in range(look_ahead):
-    
-            # Get logits from a forward pass
-            outputs = model.language_model.call(inputs_embeds=embeds)
-            logits = outputs.logits
+    greedy = True
+    top_p = 0.1
+    temperature = 1.0
 
-            # Assume batch size of 1
-            assert logits.shape[0] == 1
-            logits = logits[0, -1, :]
+    def recursive_branching_topk(candidates, embeds, tokens, branching_factor=3, remaining_depth=4):
+        assert embeds.shape[0] == 1 # Assume batch size of 1
+        assert remaining_depth >= 0 and branching_factor > 0
 
-            # Apply the repetition penalty
-            if repetition_penalty != 1.0 and tokens is not None:
-                tokens1 = tokens[0, :] # assuming batch size of 1
-                logits = repetition_penalty_apply(logits, tokens1, repetition_penalty)
+        # Get logits from a forward pass
+        outputs = model.language_model.call(inputs_embeds=embeds)
+        logits = outputs.logits[0, -1, :]
 
-            # Apply temperature and filter
-            logits = logits / (temperature if temperature > 0 else 1.0)
-            logits = top_k_top_p_filtering(logits, top_p=top_p, top_k=0.0)
+        # Apply the repetition penalty
+        if repetition_penalty != 1.0 and tokens is not None:
+            tokens1 = tokens[0, :] # assuming batch size of 1
+            logits = repetition_penalty_apply(logits, tokens1, repetition_penalty)
 
-            # Get the next token and its embedding
-            probabilities = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probabilities, 1).unsqueeze(0)
+        # Apply temperature and filter
+        logits = logits / (temperature if temperature > 0 else 1.0)
+        #logits = top_k_top_p_filtering(logits, top_p=top_p, top_k=0.0)
+ 
+        # Get the next token and its embedding
+        probabilities = F.softmax(logits, dim=-1)
+        if greedy:
+            val,idx = probabilities.topk(branching_factor)
+        else:
+            idx = torch.multinomial(probabilities, branching_factor, replacement=False)
+
+        #print(val, idx)
+        for next_token in idx:
+            next_token = next_token.view(1, -1)
             next_token_embed = model.language_model.get_embedding_text(next_token)
-
+            
             if tokens is None:
-                tokens = next_token
+                next_tokens = next_token
             else:
-                tokens = torch.cat((tokens, next_token), dim=1)
-            embeds = torch.cat((embeds, next_token_embed), dim=1)
-            
-            if stop_token == next_token.item():
-                stop = True
+                next_tokens = torch.cat((tokens, next_token), dim=1)
+            #print('embeds', embeds.shape)
+            #print('next_token_embed', next_token_embed.shape)
+            next_embeds = torch.cat((embeds, next_token_embed), dim=1)
+
+            stop = next_token.item() == stop_token
+            if remaining_depth == 0 or stop:
+                candidates.append((next_tokens, next_embeds, stop))
+            else:
+                recursive_branching_topk(candidates, next_embeds, next_tokens, branching_factor, remaining_depth-1)
+
+
+    if text_prefix_tokens is not None:
+        text_prefix_embed = model.language_model.get_embedding_text(text_prefix_tokens)
+        embeds = torch.cat((embeds, text_prefix_embed), dim=1)
+
+    tokens = None
+
+    for j in range(10):
+        candidates = []
+
+        recursive_branching_topk(candidates, embeds=embeds.clone(), tokens=tokens.clone() if tokens is not None else None, branching_factor=branching_factor, remaining_depth=look_ahead)
+        candidate_texts = [tokenizer.decode_tokens(c[0].squeeze().tolist()) for c in candidates]
+
+        # encode all candidate texts with clip
+        candidate_clip_tokens = clip.tokenize(candidate_texts).to(device)
+        candidate_clip_embeddings = clip_model.encode_text(candidate_clip_tokens).float()
+
+        # cosine similarity
+        clip_embedding = clip_embedding / torch.norm(clip_embedding)
+        candidate_clip_embeddings = candidate_clip_embeddings / torch.norm(candidate_clip_embeddings, dim=-1, keepdim=True)
+        similarities = clip_embedding @ candidate_clip_embeddings.T
+
+        best = similarities.argmax()
+        #print('best', candidate_texts[best])
+
+        best_tokens, best_embeds, stop = candidates[best]
+
+        if step_by_step:
+            if tokens is None:
+                tokens = best_tokens[:, :1]
+            else:
+                tokens = best_tokens[:, :tokens.shape[-1]+1]
+            #print('before:', best_tokens)
+            embeds = best_embeds[:, :embeds.shape[1]+1, :]
+            #print('after', tokens, stop_token)
+            if tokens[0, -1].item() == stop_token:
                 break
-        
-        return tokens, embeds, stop
-
-
-    with torch.no_grad():
-        if text_prefix_tokens is not None:
-            text_prefix_embed = model.language_model.get_embedding_text(text_prefix_tokens)
-            embeds = torch.cat((embeds, text_prefix_embed), dim=1)
-
-        tokens = None
-        stride = 5
-        samples_per_run = 256
-
-        for j in range(10):
-            candidates = []
-
-            for i in range(samples_per_run):
-                candidates.append(generate_next(look_ahead=stride, embeds=embeds.clone(), tokens=tokens.clone() if tokens is not None else None, top_p=0.6))
-            candidate_texts = [tokenizer.decode_tokens(c[0].squeeze().tolist()) for c in candidates]
-            #print(candidate_texts)
-            
-            # encode all candidate texts with clip
-            candidate_clip_tokens = clip.tokenize(candidate_texts).to(device)
-            candidate_clip_embeddings = clip_model.encode_text(candidate_clip_tokens).float()
-
-            similarities = clip_embedding @ candidate_clip_embeddings.T
-
-            best = similarities.argmax()
-            print('best', candidate_texts[best])
-
-            tokens, embeds, stop = candidates[best]
+        else:
+            tokens,embeds = best_tokens,best_embeds
             if stop:
                 break
 
-        output_list = list(tokens.squeeze().cpu().numpy())
-        output_text = tokenizer.decode_tokens(output_list)
-        print('output_text', output_text)
-        
-        generations.append(output_text)
-    
-    return generations
+    output_list = list(tokens.squeeze().cpu().numpy())
+    output_text = tokenizer.decode_tokens(output_list)
+    #print(output_list, output_text)
+    return output_text
 
 
-def generate_captions(device, language_model, tokenizer, clip_model, image_tensor, top_p_values=[0.1]):
+def generate_caption(device, language_model, tokenizer, clip_model, image_tensor, top_p_values=[0.1]):
     with torch.no_grad():
         image_tensor = image_tensor.unsqueeze(0).to(device)
         prefix = clip_model.encode_image(image_tensor).float()
         prefix_embed = language_model.clip_project(prefix)
     #generated_captions = generate_no_beam(language_model, tokenizer, prefix_embed, top_p_values, text_prefix_tokens=None)
-    generated_captions = generate_hill(device, prefix, language_model, clip_model, tokenizer, prefix_embed, top_p_values)
-    return generated_captions
+    generated_caption = generate_hill(device, prefix, language_model, clip_model, tokenizer, prefix_embed)
+    return generated_caption
 
 
 def evaluate(
@@ -338,6 +362,26 @@ def evaluate(
     language_model.to(device)
     language_model.eval()
 
+    ## hack
+    results = []
+    files = glob.glob('/data/datasets/persons_test/*.jpg')
+    dataset = FileListImageDataset(files, transform=preprocess)
+    for x in tqdm(dataset, desc='inference'):
+        image_tensor = x['image_tensor']
+        file_name = x['file_name']
+        
+        caption = generate_caption(device, language_model, tokenizer, clip_model, image_tensor, top_p_values=[0.1])
+        print(file_name)
+        print(caption)
+        results.append(
+            {
+                'file_name': file_name,
+                'caption': caption
+            }
+        )
+    return results
+    
+
     ground_truth_captions = {}
     caption_hypo = {}
 
@@ -384,6 +428,7 @@ def parse_args():
     parser.add_argument('--image_folder_path', default='/data/datasets/coco/val2017/', type=str)
 
     parser.add_argument('--checkpoint_path', type=str, default='./out/002_coco2017_gpt2_po_allfeat.ckpt_epoch_4.ckpt')
+    #parser.add_argument('--checkpoint_path', type=str, default='./out/003_coco2017_gpt2_po_allfeat_pos.ckpt_final.ckpt')
     parser.add_argument('--load_pl_checkpoint', default=True, type=str2bool)
 
     opt = parser.parse_args()
@@ -405,7 +450,30 @@ def main():
             a[k] = v
         return a
 
-    evaluate(**merge_args(evaluate, vars(opt), device=device))
+    results = evaluate(**merge_args(evaluate, vars(opt), device=device))
+
+    # Save the results
+    out_filename = f'persons_default.json'
+    with open(out_filename, "w+") as f:
+        json.dump(results, f)
+
+
+
+class FileListImageDataset(Dataset):
+    def __init__(self, file_names, transform=None):
+        super(FileListImageDataset, self).__init__()
+        self.file_names = file_names
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.file_names)
+    
+    def __getitem__(self, index):
+        fn = self.file_names[index]
+        img = Image.open(fn).convert('RGB')
+        if self.transform is not None:
+            img = self.transform(img)
+        return { 'image_tensor': img, 'file_name': fn }
 
 
 if __name__ == '__main__':
