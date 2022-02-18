@@ -464,7 +464,7 @@ def preprocess_dataset(
 
     elif visual_encoder_type == 'BLIP':
         if visual_encoder_model_variant == 'ViT-B':
-            blip_url = 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model*_base_caption.pth'
+            blip_model_url = 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model*_base_caption.pth'
         else:
             raise RuntimeError('Visual encoder model variant not supported: \'{visual_encoder_model_variant}\'')
 
@@ -477,8 +477,7 @@ def preprocess_dataset(
 
         from BLIP.models.blip import blip_decoder
 
-        model_url = visual_encoder_model_variant
-        model = blip_decoder(pretrained=model_url, image_size=image_size, vit='base', med_config='BLIP/configs/med_config.json')
+        model = blip_decoder(pretrained=blip_model_url, image_size=image_size, vit='base', med_config='BLIP/configs/med_config.json')
         model.eval()
         model = model.to(device)
 
