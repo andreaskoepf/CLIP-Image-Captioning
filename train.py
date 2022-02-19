@@ -77,7 +77,8 @@ def train(
     gpu_devices: Optional[str] = "0",
     deepspeed_strategy: Optional[str] = None,
     replace_extension: str = None,
-    resize_transform: bool = True
+    resize_transform: bool = True,
+    num_workers: int=8
 ):
     """ Starts the main training process. """ # TODO arg docs.
 
@@ -209,7 +210,7 @@ def train(
     # TODO better dataset implementation
     # - Improve dataloader system (batch_size=1 is a temporary fix)
     # - Speed up streaming (multiple workers and/or prepare data ahead of retrieval)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True)
 
     # Create trainer class.
     trainer = pl.Trainer(
