@@ -78,7 +78,7 @@ class CocoImageDataset(Dataset):
     """
     Dataset returning image tensors together with image entry objects. Mainly used for evaluating the model.  
     """
-    def __init__(self, annotation_json_path: str, image_folder_path: str, image_s):
+    def __init__(self, annotation_json_path: str, image_folder_path: str, image_transform):
         super().__init__()
         self.annotations = CocoJsonDataset(annotation_json_path)
         self.keys = list(self.annotations.image_by_id.keys())
@@ -105,13 +105,14 @@ class CocoImageDataset(Dataset):
 
 
 class CocoCaptionDataset(Dataset):
-    def __init__(self, annotation_json_path: str, image_folder_path: str, tokenizer, image_transform, max_token_length: int = 128):
+    def __init__(self, annotation_json_path: str, image_folder_path: str, tokenizer, image_transform, max_token_length: int = 128, replace_extension: str = None):
         super().__init__()
         self.annotations = CocoJsonDataset(annotation_json_path)
         self.image_folder_path = Path(image_folder_path)
         self.image_transform = image_transform
         self.tokenizer = tokenizer
         self.max_token_length = max_token_length
+        self.replace_extension = replace_extension
 
     def __len__(self):
         return len(self.annotations)
@@ -120,7 +121,10 @@ class CocoCaptionDataset(Dataset):
         entry = self.annotations[index]
 
         caption = entry.caption
-        image_path = self.image_folder_path / entry.image.file_name
+        file_name = Path(entry.image.file_name)
+        if self.replace_extension is not None:
+            file_name = file_name.stem + self.replace_extension
+        image_path = self.image_folder_path / file_name
 
         try:
             image_tensor = self.image_transform(Image.open(image_path).convert('RGB'))

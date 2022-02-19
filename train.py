@@ -44,7 +44,7 @@ class CheckpointSaver(pl.Callback):
 
 
 def train(
-    input_dataset: str,
+    input_dataset: str,     # path of COCO annotation json file
     image_folder_path: str,
     max_token_length: int = 96,
     #data_dir: str = "./train/",
@@ -75,7 +75,9 @@ def train(
     log_every_n_steps: int = 50,
     use_16bit_precision: bool = True,
     gpu_devices: Optional[str] = "0",
-    deepspeed_strategy: Optional[str] = None
+    deepspeed_strategy: Optional[str] = None,
+    replace_extension: str = None,
+    resize_transform: bool = True
 ):
     """ Starts the main training process. """ # TODO arg docs.
 
@@ -97,11 +99,18 @@ def train(
             raise RuntimeError('Visual encoder model variant not supported: \'{visual_encoder_model_variant}\'')
 
         image_size = 384
-        preprocess = transforms.Compose([
-            transforms.Resize((image_size,image_size), interpolation=InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
-        ])
+        if resize_transform:
+            preprocess = transforms.Compose([
+                transforms.Resize((image_size,image_size), interpolation=InterpolationMode.BICUBIC),
+                transforms.ToTensor(),
+                transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+            ])
+        else:
+            print('BLIP transform without resize: Expecting correctly sized input images.')
+            preprocess = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+            ])
 
         from BLIP.models.blip import blip_decoder
 
@@ -120,7 +129,8 @@ def train(
         raise RuntimeError('Unsupported visual encdore \'{visual_encoder_type}\' specified.')
 
     tokenizer = CocoCaptionDataset.create_tokenizer(tokenizer_model_type=language_model_type, tokenizer_model_variant=language_model_variant)
-    dataset = CocoCaptionDataset(annotation_json_path=input_dataset, image_folder_path=image_folder_path, image_transform=preprocess, tokenizer=tokenizer, max_token_length=max_token_length)
+    dataset = CocoCaptionDataset(annotation_json_path=input_dataset, image_folder_path=image_folder_path, image_transform=preprocess, 
+        tokenizer=tokenizer, max_token_length=max_token_length, replace_extension=replace_extension)
 
     # # Prepare training datasets.
     # if merge_datasets:
@@ -210,7 +220,7 @@ def train(
         precision=(16 if use_16bit_precision else 32),
         logger=logger,
         log_every_n_steps=log_every_n_steps,
-        track_grad_norm=2,
+        #track_grad_norm=2,
     )
 
     # Run training process.
