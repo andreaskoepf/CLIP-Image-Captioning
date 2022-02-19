@@ -97,6 +97,7 @@ class CocoImageDataset(Dataset):
         except BaseException as err:
             print(f"Failed to load image '{image_path}' (error='{err}'; type(err)={type(err)}). Skipping.")
             return None  # return None to be filtered in the batch collate_fn
+
         return {
             "image_tensor": image_tensor,
             "image_entry": image_entry
@@ -127,8 +128,8 @@ class CocoCaptionDataset(Dataset):
 
         try:
             image_tensor = self.image_transform(Image.open(image_path).convert('RGB'))
-        except (UnidentifiedImageError, OSError):
-            print(f"Failed to load image {image_file}. Skipping.")
+        except BaseException as err:
+            print(f"Failed to load image '{image_path}' (error='{err}'; type(err)={type(err)}). Skipping.")
             return None  # return None to be filtered in the batch collate_fn
 
         tokens = torch.tensor(
