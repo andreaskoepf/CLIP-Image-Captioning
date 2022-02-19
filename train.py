@@ -1,8 +1,9 @@
-from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from typing import Optional
 from pathlib import Path
 import torch
+from torch.utils.data.dataloader import default_collate
+from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 import fire
@@ -210,7 +211,13 @@ def train(
     # TODO better dataset implementation
     # - Improve dataloader system (batch_size=1 is a temporary fix)
     # - Speed up streaming (multiple workers and/or prepare data ahead of retrieval)
-    dataloader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True)
+
+    def collate_fn(batch):
+        batch = list(filter(lambda x: x is not None, batch))
+        return default_collate(batch)
+
+
+    dataloader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True, collate_fn=collate_fn)
 
     # Create trainer class.
     trainer = pl.Trainer(
