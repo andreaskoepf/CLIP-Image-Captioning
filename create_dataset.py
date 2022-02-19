@@ -128,7 +128,7 @@ class CocoCaptionDataset(Dataset):
         try:
             image_tensor = self.image_transform(Image.open(image_path).convert('RGB'))
         except (UnidentifiedImageError, OSError):
-            print(f"Failed to load image '{image_path}'. Skipping.")
+            print(f"Failed to load image {image_file}. Skipping.")
             return None  # return None to be filtered in the batch collate_fn
 
         tokens = torch.tensor(
