@@ -7,7 +7,6 @@ from clip.model import VisionTransformer
 from typing import Optional
 from pathlib import Path
 from io import BytesIO
-import pandas as pd
 import numpy as np
 import fsspec
 import torch
