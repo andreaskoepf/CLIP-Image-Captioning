@@ -53,7 +53,7 @@ def train(
     epochs: int = 3,
     save_every_epochs: int = 1,
     save_every_steps: int = 10000,
-    scheduler_warmup_steps: int = 500,
+    scheduler_warmup_steps: int = 2000,
     prefix_length: int = 10,
     prefix_size: int = 768,
     clip_prefix_length: int = 50,       # e.g. reduce to 10 when not using all vit-features
