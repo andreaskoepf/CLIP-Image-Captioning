@@ -2,6 +2,7 @@ import fire
 from pathlib import Path
 import tqdm
 from PIL import Image, UnidentifiedImageError
+from torchvision.transforms.functional import resize
 
 import torch
 from torchvision import transforms
@@ -26,12 +27,6 @@ def main(src: str, dst: str, image_size: int=384, output_extension='.png'):
     if not destination_path.exists():
         destination_path.mkdir(parents=True)
 
-    preprocess = transforms.Compose([
-        transforms.Resize((image_size,image_size), interpolation=InterpolationMode.BICUBIC),
-        transforms.ToTensor(),
-        transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
-    ])
-
     image_paths = get_image_file_names(source_path)
     i = 0
     for source_filename in tqdm.tqdm(image_paths, desc='transforming'):
@@ -43,15 +38,13 @@ def main(src: str, dst: str, image_size: int=384, output_extension='.png'):
             continue
 
         # transform image
-        img = preprocess(img)
+        img = resize(img, (image_size,image_size), interpolation=InterpolationMode.BICUBIC)
 
         # save as png
         destination_filename = source_filename.stem + output_extension
         destination_filename = destination_path / destination_filename
 
-        img = img.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
-        im = Image.fromarray(img)
-        im.save(destination_filename, format=None)
+        img.save(destination_filename, format=None)
         i += 1
 
     print(f'{i} image files pre-processed.')
