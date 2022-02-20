@@ -1,17 +1,17 @@
-import pytorch_lightning as pl
 from typing import Optional
 from pathlib import Path
+import fire
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import LearningRateMonitor
+
 import torch
 from torch.utils.data.dataloader import default_collate
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
-import fire
 
-from dataset import TokenPrefixDataset, MultiplePrefixDataset
 from model import CLIPCaptionModel, CLIPCaptionPrefixOnly
 from lms import GPT2, GPTJ, T0
-
 from create_dataset import CocoCaptionDataset
 
 
@@ -48,7 +48,6 @@ def train(
     input_dataset: str,     # path of COCO annotation json file
     image_folder_path: str,
     max_token_length: int = 96,
-    #data_dir: str = "./train/",
     output_dir: str = "./models/",
     output_name_prefix: str = "demo_model.ckpt",
     epochs: int = 3,
@@ -58,9 +57,9 @@ def train(
     prefix_length: int = 10,
     prefix_size: int = 768,
     clip_prefix_length: int = 50,       # e.g. reduce to 10 when not using all vit-features
-    pos_embeddings: bool = False,        # learn position embedding in mapping transformer
+    pos_embeddings: bool = False,       # learn position embedding in mapping transformer
     language_model_type = "gpt2",
-    language_model_variant = "gpt2-xl",
+    language_model_variant = "gpt2",    # "gpt2-xl"
     visual_encoder_type: str = 'BLIP',  # BLIP or CLIP
     visual_encoder_model_variant: str = 'ViT-B',
     batch_size: int = 16,
@@ -69,11 +68,11 @@ def train(
     use_all_vit_features: bool = True,
     num_layers: int = 8,
     num_attention_heads: int = 8,
-    normalize_prefix: bool = False,
-    merge_datasets: bool = False,
     use_deepspeed: bool = False,
     use_wandb: bool = False,
-    log_every_n_steps: int = 50,
+    wandb_project: str="CLIP-Image-Captioning",
+    wandb_name: str=None,
+    log_every_n_steps: int = 5,
     use_16bit_precision: bool = True,
     gpu_devices: Optional[str] = "0",
     deepspeed_strategy: Optional[str] = None,
@@ -134,28 +133,7 @@ def train(
     dataset = CocoCaptionDataset(annotation_json_path=input_dataset, image_folder_path=image_folder_path, image_transform=preprocess, 
         tokenizer=tokenizer, max_token_length=max_token_length, replace_extension=replace_extension)
 
-    # # Prepare training datasets.
-    # if merge_datasets:
-    #     data_dirs = data_dir.split(",")
-
-    #     if len(data_dirs) < 2:
-    #         raise ValueError(
-    #             "--merge_datasets was enabled, but less than 2 directories were specified.\n"
-    #             "You can specify more than one data directory by comma seperating the --data_dir input."
-    #         )
-        
-    #     datasets = []
-    #     for dir in data_dirs:
-    #         datasets.append(
-    #             TokenPrefixDataset(dir, batch_size=batch_size, normalize_prefix=normalize_prefix)
-    #         )
-        
-    #     dataset = MultiplePrefixDataset(*datasets)
-    # else:
-    #     dataset = TokenPrefixDataset(data_dir, batch_size=batch_size, normalize_prefix=normalize_prefix)
-
-    # TODO find better solution for using `get_linear_schedule_with_warmup` with PL.
-    total_steps = len(dataset) * epochs # batch size is already accounted for in `len(dataset)`
+    total_steps = len(dataset) // batch_size * epochs # batch size is already accounted for in `len(dataset)`
 
     model_kwargs = {
         "language_model_type": language_model_type,
@@ -204,31 +182,32 @@ def train(
 
     if use_wandb:
         from pytorch_lightning.loggers import WandbLogger
-        logger = WandbLogger(project="CLIP-Image-Captioning")
+        logger = WandbLogger(project=wandb_project, name=wandb_name)
     else:
         logger = None
-    
-    # TODO better dataset implementation
-    # - Improve dataloader system (batch_size=1 is a temporary fix)
-    # - Speed up streaming (multiple workers and/or prepare data ahead of retrieval)
 
     def collate_fn(batch):
         batch = list(filter(lambda x: x is not None, batch))
         return default_collate(batch)
 
-
     dataloader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True, collate_fn=collate_fn)
+
+    callbacks=[checkpoint_saver]
+
+    if logger is not None:
+        lr_monitor = LearningRateMonitor(logging_interval='step', log_momentum=False)
+        callbacks.append(lr_monitor)
 
     # Create trainer class.
     trainer = pl.Trainer(
         gpus=gpu_devices,
         max_epochs=epochs,
-        callbacks=[checkpoint_saver],
+        callbacks=callbacks,
         strategy=deepspeed_strategy,
         precision=(16 if use_16bit_precision else 32),
         logger=logger,
         log_every_n_steps=log_every_n_steps,
-        #track_grad_norm=2,
+        gradient_clip_val=-1    # use adaptive gradient clipping, configure_gradient_clipping is overwritten
     )
 
     # Run training process.

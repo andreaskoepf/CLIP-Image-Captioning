@@ -7,6 +7,8 @@ import math
 
 from layers import TransformerMapper, TransformerMapperAllFeatures
 from lms import GPT2, GPTJ, T0
+from auto_clip import AutoClip
+
 
 class CLIPCaptionModel(pl.LightningModule):
     def __init__(self, language_model: Union[GPT2, GPTJ, T0], encode_image, **kwargs):
@@ -19,6 +21,7 @@ class CLIPCaptionModel(pl.LightningModule):
         self.lm_embedding_size = self.language_model.get_embedding_size()
 
         self.encode_image = encode_image
+        self.autoclip = AutoClip(percentile=10)
 
         if self.hparams.use_all_vit_features:
             print('Using all ViT features.')
@@ -60,18 +63,17 @@ class CLIPCaptionModel(pl.LightningModule):
 
         return out
     
-    def on_after_backward(self):
+    def on_before_optimizer_step(self, optimizer, optimizer_idx):
         """ Callback to calculate and log grad_norm. """
-
-        sqsum = 0.0
-
-        with torch.no_grad():  
-            for param in self.parameters():
-                sqsum += (param.grad ** 2).sum().item()
-
-        grad_norm = math.sqrt(sqsum)
+        grad_norm = self.autoclip.compute_grad_norm(self)
         self.log("train/grad_norm", grad_norm)
     
+    def configure_gradient_clipping(self, optimizer, optimizer_idx, gradient_clip_val, gradient_clip_algorithm):
+        if gradient_clip_val < 0:
+            self.autoclip(self)
+        else:
+            super().configure_gradient_clipping(self, optimizer, optimizer_idx, gradient_clip_val, gradient_clip_algorithm)
+
     def configure_optimizers(self):
         """ Returns a dict containing the model's optimizer and loss rate scheduler. """
 
