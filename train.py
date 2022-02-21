@@ -169,7 +169,7 @@ def train(
     # prepare model validator
     val_clip_model = "ViT-B/32"
     clip_model, clip_image_preprocess = clip.load(val_clip_model, device=device, jit=False)
-    validation_dataset = CocoImageDataset(annotation_json_path=valid_json_path, image_folder_path=valid_image_folder_path)
+    validation_dataset = CocoImageDataset(annotation_json_path=valid_json_path, image_folder_path=valid_image_folder_path, replace_extension=replace_extension)
 
     def validation_collate(batch):
         """directly pass on PIL images"""

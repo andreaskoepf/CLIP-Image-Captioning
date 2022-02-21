@@ -78,28 +78,35 @@ class CocoImageDataset(Dataset):
     """
     Dataset returning image tensors together with image entry objects. Mainly used for evaluating the model.  
     """
-    def __init__(self, annotation_json_path: str, image_folder_path: str):
+    def __init__(self, annotation_json_path: str, image_folder_path: str, replace_extension: str = None):
         super().__init__()
         self.annotations = CocoJsonDataset(annotation_json_path)
         self.keys = list(self.annotations.image_by_id.keys())
         self.image_folder_path = Path(image_folder_path)
+        self.replace_extension = replace_extension
 
     def __len__(self):
         return len(self.keys)
+    
+    def get_image_path_by_id(self, image_id):
+        image_entry = self.annotations.image_by_id[image_id]
+        file_name = Path(image_entry.file_name)
+        if self.replace_extension is not None:
+            file_name = file_name.stem + self.replace_extension
+        return self.image_folder_path / file_name
 
     def load_image_by_id(self, image_id):
-        image_entry = self.annotations.image_by_id[image_id]
-        image_path = self.image_folder_path / image_entry.file_name
+        image_path = self.get_image_path_by_id(image_id)
         return Image.open(image_path).convert('RGB')
 
     def __getitem__(self, index):
-        image_entry = self.annotations.image_by_id[self.keys[index]]
-        image_path = self.image_folder_path / image_entry.file_name
+        image_id = self.keys[index]
+        image_entry = self.annotations.image_by_id[image_id]
 
         try:
             image = self.load_image_by_id(self.keys[index])
         except BaseException as err:
-            print(f"Failed to load image '{image_path}' (error='{err}'; type(err)={type(err)}). Skipping.")
+            print(f"Failed to load image '{self.get_image_path_by_id()}' (error='{err}'; type(err)={type(err)}). Skipping.")
             return None  # return None to be filtered in the batch collate_fn
 
         return {
