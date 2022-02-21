@@ -78,28 +78,32 @@ class CocoImageDataset(Dataset):
     """
     Dataset returning image tensors together with image entry objects. Mainly used for evaluating the model.  
     """
-    def __init__(self, annotation_json_path: str, image_folder_path: str, image_transform):
+    def __init__(self, annotation_json_path: str, image_folder_path: str):
         super().__init__()
         self.annotations = CocoJsonDataset(annotation_json_path)
         self.keys = list(self.annotations.image_by_id.keys())
         self.image_folder_path = Path(image_folder_path)
-        self.image_transform = image_transform
 
     def __len__(self):
         return len(self.keys)
+
+    def load_image_by_id(self, image_id):
+        image_entry = self.annotations.image_by_id[image_id]
+        image_path = self.image_folder_path / image_entry.file_name
+        return Image.open(image_path).convert('RGB')
 
     def __getitem__(self, index):
         image_entry = self.annotations.image_by_id[self.keys[index]]
         image_path = self.image_folder_path / image_entry.file_name
 
         try:
-            image_tensor = self.image_transform(Image.open(image_path).convert('RGB'))
+            image = self.load_image_by_id(self.keys[index])
         except BaseException as err:
             print(f"Failed to load image '{image_path}' (error='{err}'; type(err)={type(err)}). Skipping.")
             return None  # return None to be filtered in the batch collate_fn
 
         return {
-            "image_tensor": image_tensor,
+            "image": image,
             "image_entry": image_entry
         }
 

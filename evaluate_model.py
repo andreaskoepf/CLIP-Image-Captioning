@@ -1,23 +1,28 @@
-from typing import Union, Tuple, List, Optional
+from typing import Dict, Union, Tuple, List, Optional
 import inspect
 import argparse
 import json
+from unittest import result
 from tqdm import tqdm
+
+import numpy as np
 
 import torch
 import torch.nn.functional as F
+from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
 
 import clip
 from clip.model import VisionTransformer
 from create_dataset import CocoImageDataset
-from model import CLIPCaptionModel, CLIPCaptionPrefixOnly
+from model import CLIPCaptionModel, CLIPCaptionPrefixOnly, CaptionValidator
 from lms import (
     GPT2, GPT2_Tokenizer,
     GPTJ, GPTJ_Tokenizer,
     T0, T0_Tokenizer
 )
 
-from pycocoevalcap.eval import Bleu
+from pycocoevalcap.eval import Bleu, Cider
 from pycocoevalcap.eval import PTBTokenizer
 
 
@@ -31,7 +36,7 @@ def generate_scores(gts, res):
         (Bleu(4), ["Bleu_1", "Bleu_2", "Bleu_3", "Bleu_4"]),
         # (Meteor(), "METEOR"),
         # (Rouge(), "ROUGE_L"),
-        # (Cider(), "CIDEr"),
+        (Cider(), "CIDEr"),
         # (Spice(), "SPICE")
     ]
 
@@ -39,7 +44,7 @@ def generate_scores(gts, res):
     img_output = {}
 
     for scorer, method in scorers:
-        print('computing {} score...'.format(scorer.method()))
+        #print('computing {} score...'.format(scorer.method()))
         score, scores = scorer.compute_score(gts, res)
         if type(method) != list:
             method = [method]
@@ -47,7 +52,7 @@ def generate_scores(gts, res):
             scores = [scores]
 
         for sc, scs, m in zip(score, scores, method):
-            print("%s: %0.3f" % (m, sc))
+            #print("%s: %0.3f" % (m, sc))
             output[m] = sc
             for img_id, score in zip(gts.keys(), scs):
                 if type(score) is dict:
@@ -100,7 +105,6 @@ def repetition_penalty_apply(logits, tokens, penalty):
 
 def generate_no_beam(
     model: Union[CLIPCaptionModel, CLIPCaptionPrefixOnly],
-    tokenizer: GPT2_Tokenizer,
     embeds: torch.Tensor,
     top_p_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
     text_prefix_tokens: Optional[torch.Tensor] = None,
@@ -110,6 +114,7 @@ def generate_no_beam(
     repetition_penalty: float = 1.2,
 ):
 
+    tokenizer = model.tokenizer
     stop_token = tokenizer.encode_text(stop_token)[0]
     generations = []
 
@@ -154,7 +159,7 @@ def generate_no_beam(
                 if stop_token == next_token.item():
                     break
 
-            output_list = list(tokens.squeeze().cpu().numpy())
+            output_list = list(tokens.squeeze(0).cpu().numpy())
             output_text = tokenizer.decode_tokens(output_list)
         
             generations.append(output_text)
@@ -273,46 +278,240 @@ def generate_captions(device, language_model, tokenizer, clip_model, image_tenso
     return generated_captions
 
 
+def cosine_similarity(a, b):
+    a = a / torch.norm(a, dim=-1, keepdim=True)
+    b = b / torch.norm(b, dim=-1, keepdim=True)
+    return a @ b.T
+
+
+class ClipScoring:
+    def __init__(self, clip_model, clip_image_preprocess):
+        self.clip_model = clip_model
+        self.clip_image_preprocess = clip_image_preprocess
+
+    def score_image(self, image, caption, method='cosine_similarity'):
+        image_tensor = self.preprocess_image(image)
+        caption_tokens = self.tokenize(caption)
+        return self.score_tensor(image_tensor, caption_tokens, method)
+
+    @torch.no_grad()
+    def score_tensor(self, image_tensor, caption_tokens, method='cosine_similarity'):
+        device = next(self.clip_model.parameters()).device
+        if image_tensor.dim() == 3:
+            image_tensor = image_tensor.unsqueeze(0)
+        image_tensor = image_tensor.to(device)
+        caption_tokens = caption_tokens.to(device)
+        text_embedding = self.clip_model.encode_text(caption_tokens).float()
+        image_embedding = self.clip_model.encode_image(image_tensor).float()
+        if method == 'cosine_similarity':
+            score = cosine_similarity(image_embedding, text_embedding)
+        else:
+            raise ValueError(f'Invalid value for parameter method: {method}')
+        return score
+
+    def preprocess_image(self, image):
+        return self.clip_image_preprocess(image)
+
+    def tokenize(self, text):
+        return clip.tokenize(text)
+
+
+class CaptionSamplerBase:
+    def sample(self, model, image_tensor):
+        if image_tensor.dim() == 3:
+            image_tensor = image_tensor.unsqueeze(0)
+        image_embedding = model.encode_image(image_tensor)
+        prefix = model.clip_project(image_embedding)
+        return self.generate_captions(model, prefix)
+
+    def get_description(self):
+        raise NotImplementedError()
+
+    def generate_captions(self, model, prefix):
+        raise NotImplementedError()
+
+
+class NoBeamCaptionSampler(CaptionSamplerBase):
+    def __init__(self,
+        top_p_values=[0.1],
+        temperature: float = 1.0,
+        repetition_penalty: float = 1.2
+    ):
+        self.top_p_values = top_p_values
+        self.temperature = temperature
+        self.repetition_penalty = repetition_penalty
+
+    def get_description(self):
+        return f'NoBeam(rep_p={self.repetition_penalty}, temp={self.temperature}, top_p={self.top_p_values})'
+
+    @torch.no_grad()
+    def generate_captions(self, model, prefix):
+        return generate_no_beam(model, prefix, top_p_values=self.top_p_values, temperature=self.temperature, repetition_penalty=self.repetition_penalty)
+
+
+class CocoCaptionValidator(CaptionValidator):
+    def __init__(self, dataset: CocoImageDataset, preprocess, caption_samplers: Dict[str, CaptionSamplerBase], clip_scoring: ClipScoring):
+        self.dataset = dataset
+        self.preprocess = preprocess
+        self.caption_samplers = caption_samplers
+        self.clip_scoring = clip_scoring
+        self.gt_captions_by_image_id = dataset.annotations.get_captions_by_image_id()
+        self.reset()
+
+    def reset(self):
+        self.ground_truth_captions = {}
+        self.caption_hypo = {}
+        for sampler_id in self.caption_samplers.keys():
+            self.caption_hypo[sampler_id] = {}
+        self.results = {
+            'captions': []
+        }
+        self.losses = []
+        self.clip_scores = []
+
+    @torch.no_grad()
+    def process(self, model, batch):
+        results = {}
+
+        device = next(model.parameters()).device
+        batch = [x for x in batch if x is not None]
+
+        image_tensors = []
+        image_captions_gt = []
+
+        ground_truth_captions = self.ground_truth_captions
+        caption_hypo = self.caption_hypo
+        image_results = self.results['captions']
+
+        for item in batch:
+            image_entry = item['image_entry']
+            image = item['image']
+
+            gt = self.gt_captions_by_image_id[image_entry.id]
+            ground_truth_captions[image_entry.id] = [{'caption': caption} for caption in gt]
+            image_captions_gt.append(gt)
+
+            image_tensor = self.preprocess(image).to(device)
+            image_tensors.append(image_tensor)
+
+            sampling_results = []
+            for sampler_id,sampler in self.caption_samplers.items():
+                captions = sampler.sample(model, image_tensor)
+
+                caption = captions[0]
+                caption_hypo[sampler_id][image_entry.id] = [{'caption': caption}]
+
+                # compute clip score
+                clip_scores = self.clip_scoring.score_image(image, captions)
+
+                captions_result = []
+                for i,c in enumerate(captions):
+                    cs = clip_scores[0, i].item()
+                    captions_result.append(
+                        { 'caption': captions[i], 'clip_score': cs, 'gt': gt[0] }
+                    )
+                    self.clip_scores.append(cs)
+                
+                sampling_results.append(
+                    {
+                        'sampler_id': sampler_id,
+                        'captions': captions_result
+                    }
+                )
+            
+            image_result = {
+                'image_id': image_entry.id,
+                'image_url': image_entry.url,
+                'sampling_results': sampling_results
+            }
+            image_results.append(image_result)
+
+        # evaluate loss of model
+        image_batch = torch.stack(image_tensors, dim=0)
+        prefixes = model.encode_image(image_batch)
+        
+        min_cap_per_img = min(len(x) for x in image_captions_gt)
+        for i in range(min_cap_per_img):
+            encoded_text = [torch.tensor(model.tokenizer.encode_text(c[i]), dtype=torch.int64) for c in image_captions_gt]
+            max_len = max(s.shape[-1] for s in encoded_text)
+            tokens = torch.zeros(len(encoded_text), max_len, dtype=torch.int64)
+            for i,t in enumerate(encoded_text):
+                tokens[i, :t.shape[-1]] = t
+
+            tokens = tokens.to(device)
+            mask = tokens.ge(0)  # mask is zero where we out of sequence
+            tokens[~mask] = 0
+            
+            outputs = model.forward(tokens, prefixes, mask)
+            logits = outputs.logits[:, model.hparams.prefix_length - 1: -1]
+            loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), tokens.flatten(), ignore_index=0)
+            self.losses.append(loss.item())
+
+
+    def get_results(self):
+        results = self.results
+
+        # Calculate scores
+        sampler_scores = {}
+        for sample_id, sampler_hypo in self.caption_hypo.items():
+            scores, img_scores = generate_scores(self.ground_truth_captions,  sampler_hypo)
+            sampler_scores[sample_id] = scores
+
+        results['validation_loss'] = np.mean(self.losses)
+        results['clip_score'] = np.mean(self.clip_scores)
+        results['sampler_scores'] = sampler_scores
+
+        #print('eval_result', results)
+        return results
+
+    def load_image_by_id(self, image_id):
+        return self.dataset.load_image_by_id(image_id)
+
+
 def evaluate(
     device: torch.device,
     checkpoint_path: str,
     clip_model: str, 
-    use_all_vit_features: bool, 
     language_model_type: str, 
     language_model_variant: str, 
     prefix_only: bool, 
     valid_json_path: str,
     image_folder_path: str,
-    hf_cache_dir: Optional[str] = None,
+    visual_encoder_type: str='BLIP',
+    visual_encoder_model_variant: str='ViT-B',
+    hf_cache_dir: Optional[str] = None
 ):
-    max_token_length = 128
 
     print(f"loading CLIP: '{clip_model}'")
-    clip_model, preprocess = clip.load(clip_model, device=device, jit=False)
+    clip_model, clip_image_preprocess = clip.load(clip_model, device=device, jit=False)
 
-    if use_all_vit_features:
-        # original: https://github.com/openai/CLIP/blob/40f5484c1c74edd83cb9cf687c6ab92b28d8b656/clip/model.py#L202-L236
-        def vit_forward_patch(self, x: torch.Tensor):
-            x = self.conv1(x)  # shape = [*, width, grid, grid]
-            x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
-            x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
-            x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
-            x = x + self.positional_embedding.to(x.dtype)
-            x = self.ln_pre(x)
+    if visual_encoder_type == 'BLIP':
+        if visual_encoder_model_variant == 'ViT-B':
+            blip_model_url = 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model*_base_caption.pth'
+        else:
+            raise RuntimeError('Visual encoder model variant not supported: \'{visual_encoder_model_variant}\'')
 
-            x = x.permute(1, 0, 2)  # NLD -> LND
-            x = self.transformer(x)
-            x = x.permute(1, 0, 2)  # LND -> NLD
+        image_size = 384
+        preprocess = transforms.Compose([
+            transforms.Resize((image_size,image_size), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+        ])
+        
+        from BLIP.models.blip import blip_decoder
 
-            # this patch removes the CLS token output extraction + projection from CLIP's ViT forward method
-            #x = self.ln_post(x[:, 0, :])
+        blip_model = blip_decoder(pretrained=blip_model_url, image_size=image_size, vit='base', med_config='BLIP/configs/med_config.json')
+        blip_model.eval()
 
-            if self.proj is not None:
-                x = x @ self.proj
+        blip_model = blip_model.to(device)
 
-            return x
+        def blip_encode(image):
+            with torch.no_grad():
+                return blip_model.visual_encoder(image)
 
-        clip_model.visual.forward = vit_forward_patch.__get__(clip_model.visual, VisionTransformer)
+        encode_image = blip_encode
+    else:
+        raise RuntimeError('Unsupported visual encdore \'{visual_encoder_type}\' specified.')
 
     print(f"loading LM variant: '{language_model_variant}'")
     if language_model_type == "gpt2":
@@ -327,25 +526,42 @@ def evaluate(
     else:
         raise ValueError(f"invalid language model type '{language_model_type}' (expected 'gpt-j' / 'gpt2' / 't0' / 't5')")
 
-    dataset = CocoImageDataset(annotation_json_path=valid_json_path, image_folder_path=image_folder_path, image_transform=preprocess)
+    dataset = CocoImageDataset(annotation_json_path=valid_json_path, image_folder_path=image_folder_path)
     gt_captions_by_image_id = dataset.annotations.get_captions_by_image_id()    
 
     if prefix_only:
-        language_model = CLIPCaptionPrefixOnly.load_from_checkpoint(checkpoint_path=checkpoint_path, language_model=language_model, strict=False)
+        model = CLIPCaptionPrefixOnly.load_from_checkpoint(checkpoint_path=checkpoint_path, language_model=language_model, tokenizer=tokenizer, validator=None, encode_image=encode_image, strict=False)
     else:
-        language_model = CLIPCaptionModel.load_from_checkpoint(checkpoint_path=checkpoint_path, language_model=language_model, strict=False)
+        model = CLIPCaptionModel.load_from_checkpoint(checkpoint_path=checkpoint_path, language_model=language_model, tokenizer=tokenizer, encode_image=encode_image, validator=None, strict=False)
 
-    language_model.to(device)
-    language_model.eval()
+    model.to(device)
+    model.eval()
 
-    ground_truth_captions = {}
-    caption_hypo = {}
+    caption_sampler = NoBeamCaptionSampler(top_p_values=[0.1, 0.2])
+    clip_scoring = ClipScoring(clip_model, clip_image_preprocess)
+    validator = CocoCaptionValidator(dataset, preprocess, { 'nobeam1': caption_sampler }, clip_scoring)
 
     for x in tqdm(dataset, desc='inference'):
-        image_tensor = x['image_tensor']
-        image_entry = x['image_entry']
-        print('image-url: ', image_entry.url)
-        caption = generate_captions(device, language_model, tokenizer, clip_model, image_tensor, top_p_values=[0.1])[0]
+        # image_entry = x['image_entry']
+        # image = x['image']
+
+        dummy_batch = [x]
+        validator.process(model, dummy_batch)
+    
+    results = validator.get_results()
+    print(results)
+
+        # print('image-url: ', image_entry.url)
+
+        # gt = gt_captions_by_image_id[image_entry.id]
+        # print('ground truth: ', gt)
+
+        # image_tensor = preprocess(image).to(device)
+        # caption = caption_sampler.sample(model, image_tensor)
+        # print('caption:', caption)
+
+
+    """
         caption_hypo[image_entry.id] = [{'caption': caption}]
         ground_truth_captions[image_entry.id] = [{'caption': caption} for caption in gt_captions_by_image_id[image_entry.id]]
 
@@ -353,6 +569,7 @@ def evaluate(
     scores, img_scores = generate_scores(ground_truth_captions, caption_hypo)
     print("Scores")
     print(scores)
+    """
 
 
 # parse bool args correctly, see https://stackoverflow.com/a/43357954
@@ -383,8 +600,10 @@ def parse_args():
     parser.add_argument('--valid_json_path', default='/data/datasets/coco/annotations/captions_val2017.json', type=str)
     parser.add_argument('--image_folder_path', default='/data/datasets/coco/val2017/', type=str)
 
-    parser.add_argument('--checkpoint_path', type=str, default='./out/002_coco2017_gpt2_po_allfeat.ckpt_epoch_4.ckpt')
-    parser.add_argument('--load_pl_checkpoint', default=True, type=str2bool)
+    parser.add_argument('--visual_encoder_type', type=str, default='BLIP')
+    parser.add_argument('--visual_encoder_model_variant', type=str, default='ViT-B')
+
+    parser.add_argument('--checkpoint_path', type=str, default='./out/005_final.ckpt')
 
     opt = parser.parse_args()
     return opt

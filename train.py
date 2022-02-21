@@ -12,7 +12,9 @@ from torchvision.transforms.functional import InterpolationMode
 
 from model import CLIPCaptionModel, CLIPCaptionPrefixOnly
 from lms import GPT2, GPTJ, T0
-from create_dataset import CocoCaptionDataset
+import clip
+from create_dataset import CocoCaptionDataset, CocoImageDataset
+from evaluate_model import ClipScoring, CocoCaptionValidator, NoBeamCaptionSampler
 
 
 class CheckpointSaver(pl.Callback):
@@ -45,8 +47,11 @@ class CheckpointSaver(pl.Callback):
 
 
 def train(
-    input_dataset: str,     # path of COCO annotation json file
+    input_dataset: str,     # path of COCO train annotation json file
     image_folder_path: str,
+    valid_json_path: str,   # path of COCO valid annotation json file
+    valid_image_folder_path: str,
+    validation_interval: int = 3,
     max_token_length: int = 96,
     output_dir: str = "./models/",
     output_name_prefix: str = "demo_model.ckpt",
@@ -133,7 +138,7 @@ def train(
     dataset = CocoCaptionDataset(annotation_json_path=input_dataset, image_folder_path=image_folder_path, image_transform=preprocess, 
         tokenizer=tokenizer, max_token_length=max_token_length, replace_extension=replace_extension)
 
-    total_steps = len(dataset) // batch_size * epochs # batch size is already accounted for in `len(dataset)`
+    total_steps = len(dataset) // batch_size * epochs
 
     model_kwargs = {
         "language_model_type": language_model_type,
@@ -148,7 +153,8 @@ def train(
         "scheduler_warmup_steps": scheduler_warmup_steps,
         "total_steps": total_steps,
         "use_deepspeed": use_deepspeed,
-        "optimizer_lr": optimizer_lr
+        "optimizer_lr": optimizer_lr,
+        "validation_interval": validation_interval
     }
     
     if language_model_type == "gpt2":
@@ -160,15 +166,29 @@ def train(
     else:
         raise ValueError(f"invalid language model type '{language_model_type}' (expected 'gpt-j' / 'gpt2' / 't0' / 't5')")
     
+    # prepare model validator
+    val_clip_model = "ViT-B/32"
+    clip_model, clip_image_preprocess = clip.load(val_clip_model, device=device, jit=False)
+    validation_dataset = CocoImageDataset(annotation_json_path=valid_json_path, image_folder_path=valid_image_folder_path)
+
+    def validation_collate(batch):
+        """directly pass on PIL images"""
+        return batch
+
+    validation_dataloader = DataLoader(validation_dataset, batch_size=1, shuffle=False, collate_fn=validation_collate, pin_memory=False)
+    caption_sampler = NoBeamCaptionSampler(top_p_values=[0.1, 0.2])
+    clip_scoring = ClipScoring(clip_model, clip_image_preprocess)
+    validator = CocoCaptionValidator(validation_dataset, preprocess, { caption_sampler.get_description(): caption_sampler }, clip_scoring)
+
     if prefix_only:
         language_model = language_model.eval()
         for param in language_model.parameters():
-            param.requires_grad = False 
+            param.requires_grad = False
 
-        model = CLIPCaptionPrefixOnly(language_model, encode_image, **model_kwargs)
+        model = CLIPCaptionPrefixOnly(language_model, tokenizer, encode_image, validator=validator, **model_kwargs)
         print("Train only Prefix.")
     else:
-        model = CLIPCaptionModel(language_model, encode_image, **model_kwargs)
+        model = CLIPCaptionModel(language_model, tokenizer, encode_image, validator=validator, **model_kwargs)
         print("Train both Prefix and Language Model.")
     
     # Create `CheckpointSaver` as a trainer callback instance.
@@ -207,11 +227,14 @@ def train(
         precision=(16 if use_16bit_precision else 32),
         logger=logger,
         log_every_n_steps=log_every_n_steps,
-        gradient_clip_val=-1    # use adaptive gradient clipping, configure_gradient_clipping is overwritten
+        gradient_clip_val=-1,    # use adaptive gradient clipping, configure_gradient_clipping is overwritten
+        val_check_interval=validation_interval,
+        check_val_every_n_epoch=1,
+        limit_val_batches=100
     )
 
     # Run training process.
-    trainer.fit(model, dataloader)
+    trainer.fit(model, dataloader, validation_dataloader)
 
     # Save final checkpoint.
     checkpoint_saver.save_final_checkpoint(trainer)
