@@ -14,7 +14,7 @@ from model import CLIPCaptionModel, CLIPCaptionPrefixOnly
 from lms import GPT2, GPTJ, T0
 import clip
 from create_dataset import CocoCaptionDataset, CocoImageDataset
-from evaluate_model import ClipScoring, CocoCaptionValidator, NoBeamCaptionSampler
+from evaluate_model import ClipGuidedCaptionSampler, ClipScoring, CocoCaptionValidator, NoBeamCaptionSampler
 
 
 class CheckpointSaver(pl.Callback):
@@ -33,14 +33,14 @@ class CheckpointSaver(pl.Callback):
         if epoch % self.save_every_n_epochs == 0:
             output_path = self.output_path / f"{self.filename_prefix}_epoch_{epoch}{'.ckpt' if not self.use_deepspeed else ''}"
             trainer.save_checkpoint(output_path)
-    
+
     def on_batch_end(self, trainer: pl.Trainer, _):
         if self.save_every_n_steps is not None:
             current_step = trainer.global_step
             if (current_step % self.save_every_n_steps == 0):
                 output_path = self.output_path / f"{self.filename_prefix}_latest{'.ckpt' if not self.use_deepspeed else ''}"
                 trainer.save_checkpoint(output_path)
-    
+
     def save_final_checkpoint(self, trainer: pl.Trainer):
         output_path = self.output_path / f"{self.filename_prefix}_final{'.ckpt' if not self.use_deepspeed else ''}"
         trainer.save_checkpoint(output_path)
@@ -51,7 +51,7 @@ def train(
     image_folder_path: str,
     valid_json_path: str,   # path of COCO valid annotation json file
     valid_image_folder_path: str,
-    validation_interval: int = 2000,
+    validation_interval: int = 1000,
     max_token_length: int = 96,
     output_dir: str = "./models/",
     output_name_prefix: str = "demo_model.ckpt",
@@ -83,7 +83,8 @@ def train(
     deepspeed_strategy: Optional[str] = None,
     replace_extension: str = None,
     resize_transform: bool = True,
-    num_workers: int=8
+    num_workers: int=8,
+    max_log_samples: int=64
 ):
     """ Starts the main training process. """ # TODO arg docs.
 
@@ -135,7 +136,7 @@ def train(
         raise RuntimeError('Unsupported visual encdore \'{visual_encoder_type}\' specified.')
 
     tokenizer = CocoCaptionDataset.create_tokenizer(tokenizer_model_type=language_model_type, tokenizer_model_variant=language_model_variant)
-    dataset = CocoCaptionDataset(annotation_json_path=input_dataset, image_folder_path=image_folder_path, image_transform=preprocess, 
+    dataset = CocoCaptionDataset(annotation_json_path=input_dataset, image_folder_path=image_folder_path, image_transform=preprocess,
         tokenizer=tokenizer, max_token_length=max_token_length, replace_extension=replace_extension)
 
     total_steps = len(dataset) // batch_size * epochs
@@ -154,9 +155,10 @@ def train(
         "total_steps": total_steps,
         "use_deepspeed": use_deepspeed,
         "optimizer_lr": optimizer_lr,
-        "validation_interval": validation_interval
+        "validation_interval": validation_interval,
+        "max_log_samples": max_log_samples
     }
-    
+
     if language_model_type == "gpt2":
         language_model = GPT2.create(language_model_variant)
     elif language_model_type in ("gptj", "gpt-j"):
@@ -165,7 +167,7 @@ def train(
         language_model = T0.create(language_model_variant)
     else:
         raise ValueError(f"invalid language model type '{language_model_type}' (expected 'gpt-j' / 'gpt2' / 't0' / 't5')")
-    
+
     # prepare model validator
     val_clip_model = "ViT-B/32"
     clip_model, clip_image_preprocess = clip.load(val_clip_model, device=device, jit=False)
@@ -176,9 +178,18 @@ def train(
         return batch
 
     validation_dataloader = DataLoader(validation_dataset, batch_size=1, shuffle=False, collate_fn=validation_collate, pin_memory=False)
-    caption_sampler = NoBeamCaptionSampler(top_p_values=[0.1, 0.2])
+    nobeam_sampler = NoBeamCaptionSampler(top_p_values=[0.1, 0.2])
     clip_scoring = ClipScoring(clip_model, clip_image_preprocess)
-    validator = CocoCaptionValidator(validation_dataset, preprocess, { 'nobeam1': caption_sampler }, clip_scoring)
+    clip_guided_sampler = ClipGuidedCaptionSampler(clip_scoring, branching_factor=2, look_ahead=4)
+    validator = CocoCaptionValidator(
+        validation_dataset,
+        preprocess,
+        {
+            'nobeam': nobeam_sampler,
+            'clip_guided': clip_guided_sampler
+        },
+        clip_scoring
+    )
 
     if prefix_only:
         language_model = language_model.eval()
@@ -190,7 +201,7 @@ def train(
     else:
         model = CLIPCaptionModel(language_model, tokenizer, encode_image, validator=validator, **model_kwargs)
         print("Train both Prefix and Language Model.")
-    
+
     # Create `CheckpointSaver` as a trainer callback instance.
     checkpoint_saver = CheckpointSaver(
         Path(output_dir),

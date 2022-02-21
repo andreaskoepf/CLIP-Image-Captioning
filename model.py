@@ -23,7 +23,14 @@ class CaptionValidator:
 
 
 class CLIPCaptionModel(pl.LightningModule):
-    def __init__(self, language_model: Union[GPT2, GPTJ, T0], tokenizer, encode_image, validator: CaptionValidator, **kwargs):
+    def __init__(self,
+        language_model: Union[GPT2, GPTJ, T0],
+        tokenizer,
+        encode_image,
+        validator: CaptionValidator, 
+        max_log_samples: int=64,
+        **kwargs
+    ):
         super().__init__()
 
         # Save hparams (see `train.py` for arguments).
@@ -67,14 +74,18 @@ class CLIPCaptionModel(pl.LightningModule):
         results = self.validator.get_results()
         self.validator.reset()
 
-        self.log('val/loss', results['validation_loss'])
-        self.log('val/clip_score', results['clip_score'])
+        self.log_dict({
+            'val/loss': results['validation_loss'],
+            'val/clip_score': results['clip_score']
+        })
         for sampler_id, scores in results['sampler_scores'].items(): 
-            self.log(f'val/{sampler_id}.CIDEr', scores['CIDEr'])
-            self.log(f'val/{sampler_id}.Bleu_4', scores['Bleu_4'])
+            self.log_dict({
+                f'val/{sampler_id}.CIDEr': scores['CIDEr'],
+                f'val/{sampler_id}.Bleu_4': scores['Bleu_4']
+            })
 
         # log validation results to wandb
-        max_log_samples = 32
+        max_log_samples = self.hparams.max_log_samples
         thumbnail_size = 128, 128
         if self.logger:
             columns = ["image_id", "image_url", "thumbnail", "caption", "clip_score", "gt", "sampler_id"]
