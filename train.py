@@ -51,7 +51,7 @@ def train(
     image_folder_path: str,
     valid_json_path: str,   # path of COCO valid annotation json file
     valid_image_folder_path: str,
-    validation_interval: int = 3,
+    validation_interval: int = 2000,
     max_token_length: int = 96,
     output_dir: str = "./models/",
     output_name_prefix: str = "demo_model.ckpt",
