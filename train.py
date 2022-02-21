@@ -178,7 +178,7 @@ def train(
     validation_dataloader = DataLoader(validation_dataset, batch_size=1, shuffle=False, collate_fn=validation_collate, pin_memory=False)
     caption_sampler = NoBeamCaptionSampler(top_p_values=[0.1, 0.2])
     clip_scoring = ClipScoring(clip_model, clip_image_preprocess)
-    validator = CocoCaptionValidator(validation_dataset, preprocess, { caption_sampler.get_description(): caption_sampler }, clip_scoring)
+    validator = CocoCaptionValidator(validation_dataset, preprocess, { 'nobeam1': caption_sampler }, clip_scoring)
 
     if prefix_only:
         language_model = language_model.eval()
