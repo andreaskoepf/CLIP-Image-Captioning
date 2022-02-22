@@ -133,11 +133,6 @@ class CLIPCaptionModel(pl.LightningModule):
 
         return out
     
-    def on_before_optimizer_step(self, optimizer, optimizer_idx):
-        """ Callback to calculate and log grad_norm. """
-        grad_norm = self.autoclip.compute_grad_norm(self)
-        self.log("train/grad_norm", grad_norm)
-    
     def configure_gradient_clipping(self, optimizer, optimizer_idx, gradient_clip_val, gradient_clip_algorithm):
         grad_norm = self.autoclip.compute_grad_norm(self)
         self.log("train/grad_norm_pre_clip", grad_norm)
@@ -146,6 +141,9 @@ class CLIPCaptionModel(pl.LightningModule):
             self.autoclip(self)
         else:
             super().configure_gradient_clipping(self, optimizer, optimizer_idx, gradient_clip_val, gradient_clip_algorithm)
+
+        grad_norm = self.autoclip.compute_grad_norm(self)
+        self.log("train/grad_norm_post_clip", grad_norm)
 
     def configure_optimizers(self):
         """ Returns a dict containing the model's optimizer and loss rate scheduler. """
