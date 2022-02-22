@@ -71,7 +71,9 @@ class MLPTransformer(nn.Module):
         if out_d is None:
             out_d = in_dim
 
-        self.fc1 = nn.Linear(in_dim, h_dim)
+        h_dim_pre_act = h_dim if act != geglu else h_dim * 2 
+        self.fc1 = nn.Linear(in_dim, h_dim_pre_act)
+        
         self.act = act
         self.fc2 = nn.Linear(h_dim, out_d)
         self.dropout = nn.Dropout(dropout)
