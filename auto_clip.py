@@ -9,7 +9,7 @@ class AutoClip:
     AUTOCLIP: ADAPTIVE GRADIENT CLIPPING FOR SOURCE SEPARATION NETWORKS
     https://arxiv.org/abs/2007.14469
     """
-    def __init__(self, percentile=10, max_keep_history=10000):
+    def __init__(self, percentile=10, max_keep_history=50000):
         self.grad_history = deque(maxlen=max_keep_history)
         self.percentile = percentile
         self.max_keep_history = max_keep_history

@@ -28,6 +28,7 @@ class CLIPCaptionModel(pl.LightningModule):
         tokenizer,
         encode_image,
         validator: CaptionValidator, 
+        autoclip_p: int=10,
         max_log_samples: int=64,
         **kwargs
     ):
@@ -41,7 +42,7 @@ class CLIPCaptionModel(pl.LightningModule):
         self.lm_embedding_size = self.language_model.get_embedding_size()
 
         self.encode_image = encode_image
-        self.autoclip = AutoClip(percentile=10)
+        self.autoclip = AutoClip(percentile=autoclip_p)
         self.validator = validator
 
         if self.hparams.use_all_vit_features:
@@ -53,7 +54,10 @@ class CLIPCaptionModel(pl.LightningModule):
                 clip_length=self.hparams.clip_prefix_length,
                 use_pos_embeddings=self.hparams.pos_embeddings,
                 num_heads=self.hparams.num_attention_heads,
-                num_layers=self.hparams.num_layers
+                num_layers=self.hparams.num_layers,
+                mlp_ratio=self.hparams.mlp_ratio,
+                prefix_init_std=self.hparams.prefix_init_std,
+                act_fn_name=self.hparams.act_fn_name
             )
         else:
             self.clip_project = TransformerMapper(
@@ -62,7 +66,10 @@ class CLIPCaptionModel(pl.LightningModule):
                 prefix_length=self.hparams.prefix_length,
                 clip_length=self.hparams.clip_prefix_length,
                 num_heads=self.hparams.num_attention_heads,
-                num_layers=self.hparams.num_layers
+                num_layers=self.hparams.num_layers,
+                mlp_ratio=self.hparams.mlp_ratio,
+                prefix_init_std=self.hparams.prefix_init_std,
+                act_fn_name=self.hparams.act_fn_name
             )
 
     def validation_step(self, batch, batch_idx):

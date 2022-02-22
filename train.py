@@ -73,6 +73,9 @@ def train(
     use_all_vit_features: bool = True,
     num_layers: int = 8,
     num_attention_heads: int = 8,
+    mlp_ratio: float=4.,
+    prefix_init_std: float=1.,
+    act_fn_name: str='relu',    # activation function used for transformer mapper
     use_deepspeed: bool = False,
     use_wandb: bool = False,
     wandb_project: str="CLIP-Image-Captioning",
@@ -85,6 +88,7 @@ def train(
     resize_transform: bool = True,
     num_workers: int=8,
     max_log_samples: int=64,
+    autoclip_p: int=10,
     enable_checkpointing: bool=False
 ):
     """ Starts the main training process. """ # TODO arg docs.
@@ -150,6 +154,9 @@ def train(
         "prefix_size": prefix_size,
         "num_layers": num_layers,
         "num_attention_heads": num_attention_heads,
+        "mlp_ratio": mlp_ratio,
+        "prefix_init_std": prefix_init_std,
+        "act_fn_name": act_fn_name,
         "use_all_vit_features": use_all_vit_features,
         "pos_embeddings": pos_embeddings,
         "scheduler_warmup_steps": scheduler_warmup_steps,
@@ -197,10 +204,10 @@ def train(
         for param in language_model.parameters():
             param.requires_grad = False
 
-        model = CLIPCaptionPrefixOnly(language_model, tokenizer, encode_image, validator=validator, **model_kwargs)
+        model = CLIPCaptionPrefixOnly(language_model, tokenizer, encode_image, validator=validator, autoclip_p=autoclip_p, **model_kwargs)
         print("Train only Prefix.")
     else:
-        model = CLIPCaptionModel(language_model, tokenizer, encode_image, validator=validator, **model_kwargs)
+        model = CLIPCaptionModel(language_model, tokenizer, encode_image, validator=validator, autoclip_p=autoclip_p, **model_kwargs)
         print("Train both Prefix and Language Model.")
 
     # Create `CheckpointSaver` as a trainer callback instance.
