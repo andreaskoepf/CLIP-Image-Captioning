@@ -30,14 +30,14 @@ class CheckpointSaver(pl.Callback):
 
     def on_epoch_end(self, trainer: pl.Trainer, _):
         epoch = trainer.current_epoch
-        if epoch % self.save_every_n_epochs == 0:
+        if self.save_every_n_epochs > 0 and epoch % self.save_every_n_epochs == 0:
             output_path = self.output_path / f"{self.filename_prefix}_epoch_{epoch}{'.ckpt' if not self.use_deepspeed else ''}"
             trainer.save_checkpoint(output_path)
 
     def on_batch_end(self, trainer: pl.Trainer, _):
         if self.save_every_n_steps is not None:
             current_step = trainer.global_step
-            if (current_step % self.save_every_n_steps == 0):
+            if self.save_every_n_steps > 0 and current_step % self.save_every_n_steps == 0:
                 output_path = self.output_path / f"{self.filename_prefix}_latest{'.ckpt' if not self.use_deepspeed else ''}"
                 trainer.save_checkpoint(output_path)
 
