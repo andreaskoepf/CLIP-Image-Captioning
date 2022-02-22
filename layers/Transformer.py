@@ -5,6 +5,7 @@ import torch
 
 from .MultiHeadAttention import MultiHeadAttention
 
+
 class Transformer(nn.Module):
     def __init__(self, dim_self: int, num_heads: int, num_layers: int, dim_ref: Optional[int] = None,
                  mlp_ratio: float = 2., act=nnf.relu, norm_layer: nn.Module = nn.LayerNorm, enc_dec: bool = False):
@@ -12,10 +13,6 @@ class Transformer(nn.Module):
 
         if dim_ref is None:
             dim_ref = dim_self
-        else:
-            dim_ref = dim_ref
-
-        dim_self = dim_self
         self.enc_dec = enc_dec
 
         if self.enc_dec:
@@ -110,14 +107,42 @@ class TransformerLayer(nn.Module):
         return x
 
 
+def geglu(x):
+    x, gate = x.chunk(2, dim = -1)
+    return x * nnf.gelu(gate)
+
+
+def parse_act_fn(name: str):
+    name = name.lower()
+    if name == 'relu':
+        return nnf.relu
+    elif name == 'gelu':
+        return nnf.gelu
+    elif name == 'geglu':
+        return geglu
+    else:
+        raise ValueError(f'Specified activation function {name} is not supported.')
+
+
 class TransformerMapper(nn.Module):
-    def __init__(self, dim_clip: int, dim_embedding: int, prefix_length: int, clip_length: int, num_heads: int=8, num_layers: int=8):
+    def __init__(self,
+        dim_clip: int, 
+        dim_embedding: int,
+        prefix_length: int,
+        clip_length: int,
+        num_heads: int=8,
+        num_layers: int=8,
+        mlp_ratio: float=4.,
+        prefix_init_std: float=1.,
+        act_fn_name: str='relu'
+    ):
         super().__init__()
 
         self.clip_length = clip_length
-        self.transformer = Transformer(dim_embedding, num_heads, num_layers)
+
+        self.transformer = Transformer(dim_embedding, num_heads, num_layers, mlp_ratio=mlp_ratio, act=parse_act_fn(act_fn_name))
         self.linear = nn.Linear(dim_clip, clip_length * dim_embedding)
-        self.prefix_const = nn.Parameter(torch.randn(prefix_length, dim_embedding), requires_grad=True)
+        self.prefix_const = nn.Parameter(torch.randn(prefix_length, dim_embedding) * prefix_init_std, requires_grad=True)
 
     def forward(self, x):
         x = self.linear(x).view(x.shape[0], self.clip_length, -1)
@@ -131,12 +156,23 @@ class TransformerMapper(nn.Module):
 
     
 class TransformerMapperAllFeatures(nn.Module):
-    def __init__(self, dim_clip: int, dim_embedding: int, prefix_length: int, clip_length: int, use_pos_embeddings: bool, num_heads: int=8, num_layers: int=8):
+    def __init__(self,
+        dim_clip: int,
+        dim_embedding: int,
+        prefix_length: int,
+        clip_length: int, 
+        use_pos_embeddings: bool,
+        num_heads: int=8,
+        num_layers: int=8,
+        mlp_ratio: float=4.,
+        prefix_init_std: float=1.,
+        act_fn_name: str='relu'
+    ):
         super().__init__()
 
-        self.transformer = Transformer(dim_embedding, num_heads, num_layers)
+        self.transformer = Transformer(dim_embedding, num_heads, num_layers, mlp_ratio=mlp_ratio, act=parse_act_fn(act_fn_name))
         self.linear = nn.Linear(dim_clip, dim_embedding)
-        self.prefix_const = nn.Parameter(torch.randn(prefix_length, dim_embedding), requires_grad=True)
+        self.prefix_const = nn.Parameter(torch.randn(prefix_length, dim_embedding) * prefix_init_std, requires_grad=True)
         if use_pos_embeddings:
             print('Using position embeddings.')
             self.pos_embeddings = nn.Parameter(torch.randn(clip_length, dim_embedding), requires_grad=True)
