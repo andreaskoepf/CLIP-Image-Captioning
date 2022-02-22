@@ -108,11 +108,12 @@ def generate_no_beam(
     embeds: torch.Tensor,
     top_p_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
     text_prefix_tokens: Optional[torch.Tensor] = None,
-    max_decode_length: int = 96,
+    max_decode_length: int = 75,
     temperature: float = 1.0,
     stop_token: str = '.',
     repetition_penalty: float = 1.2,
 ):
+    assert max_decode_length <= 77, "maximum context length for CLIP models is 77"
 
     tokenizer = model.tokenizer
     special_tokens = tokenizer.all_special_ids
@@ -176,7 +177,7 @@ def generate_clip_guided(
     clip_model,
     embeds: torch.Tensor,
     text_prefix_tokens: Optional[torch.Tensor] = None,
-    max_decode_length: int = 80,
+    max_decode_length: int = 75,
     temperature: float = 1.0,
     stop_token: str = '.',
     repetition_penalty: float = 1.2,
@@ -184,6 +185,7 @@ def generate_clip_guided(
     branching_factor = 3,
     step_by_step = False
 ):
+    assert max_decode_length <= 77, "maximum context length for CLIP models is 77"
 
     if clip_image_embedding.dim() == 3 and clip_image_embedding.shape[-2] > 1:
          clip_image_embedding = clip_image_embedding[:,0,:]
@@ -244,10 +246,18 @@ def generate_clip_guided(
 
     tokens = None
 
-    for j in range(max_decode_length):
+    while True:
         candidates = []
+        
+        current_length = tokens.shape[-1] if tokens is not None else 0
+        recursive_branching_topk(
+            candidates,
+            embeds=embeds.clone(),
+            tokens=tokens.clone() if tokens is not None else None,
+            branching_factor=branching_factor,
+            remaining_depth=min(look_ahead, max_decode_length-current_length)
+        )
 
-        recursive_branching_topk(candidates, embeds=embeds.clone(), tokens=tokens.clone() if tokens is not None else None, branching_factor=branching_factor, remaining_depth=look_ahead)
         candidate_texts = [tokenizer.decode_tokens(c[0].squeeze().tolist()) for c in candidates]
 
         # encode all candidate texts with clip
@@ -271,7 +281,7 @@ def generate_clip_guided(
             #print('before:', best_tokens)
             embeds = best_embeds[:, :embeds.shape[1]+1, :]
             #print('after', tokens, stop_token)
-            if tokens[0, -1].item() == stop_token or tokens[0, -1].item() in special_tokens:
+            if tokens.shape[-1] >= max_decode_length or tokens[0, -1].item() == stop_token or tokens[0, -1].item() in special_tokens:
                 break
         else:
             tokens,embeds = best_tokens,best_embeds
