@@ -84,7 +84,8 @@ def train(
     replace_extension: str = None,
     resize_transform: bool = True,
     num_workers: int=8,
-    max_log_samples: int=64
+    max_log_samples: int=64,
+    enable_checkpointing: bool=False
 ):
     """ Starts the main training process. """ # TODO arg docs.
 
@@ -213,7 +214,7 @@ def train(
 
     if use_wandb:
         from pytorch_lightning.loggers import WandbLogger
-        logger = WandbLogger(project=wandb_project, name=wandb_name)
+        logger = WandbLogger(project=wandb_project, name=wandb_name, log_model=False)
     else:
         logger = None
 
@@ -241,7 +242,8 @@ def train(
         gradient_clip_val=-1,    # use adaptive gradient clipping, configure_gradient_clipping is overwritten
         val_check_interval=validation_interval,
         check_val_every_n_epoch=1,
-        limit_val_batches=100
+        limit_val_batches=100,
+        enable_checkpointing=enable_checkpointing
     )
 
     # Run training process.
