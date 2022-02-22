@@ -116,8 +116,12 @@ def parse_act_fn(name: str):
     name = name.lower()
     if name == 'relu':
         return nnf.relu
+    if name == 'elu':
+        return nnf.elu
     elif name == 'gelu':
         return nnf.gelu
+    elif name == 'selu':
+        return nnf.selu
     elif name == 'geglu':
         return geglu
     else:
