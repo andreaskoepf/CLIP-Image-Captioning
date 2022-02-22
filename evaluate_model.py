@@ -261,7 +261,7 @@ def generate_clip_guided(
         candidate_texts = [tokenizer.decode_tokens(c[0].squeeze().tolist()) for c in candidates]
 
         # encode all candidate texts with clip
-        candidate_clip_tokens = clip.tokenize(candidate_texts).to(device)
+        candidate_clip_tokens = clip.tokenize(candidate_texts, truncate=True).to(device)
         candidate_clip_embeddings = clip_model.encode_text(candidate_clip_tokens).float()
 
         # cosine similarity
@@ -333,7 +333,7 @@ class ClipScoring:
         return self.clip_image_preprocess(image)
 
     def tokenize(self, text):
-        return clip.tokenize(text)
+        return clip.tokenize(text, truncate=True)
 
 
 class CaptionSamplerBase:
