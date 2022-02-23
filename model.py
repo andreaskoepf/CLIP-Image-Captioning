@@ -78,6 +78,9 @@ class CLIPCaptionModel(pl.LightningModule):
         self.validator.process(self, batch)
 
     def validation_epoch_end(self, val_step_outputs):
+        if self.validator is None:
+            return
+
         results = self.validator.get_results()
         self.validator.reset()
 

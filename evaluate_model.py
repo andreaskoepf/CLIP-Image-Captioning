@@ -409,7 +409,7 @@ class CocoCaptionValidator(CaptionValidator):
         self.preprocess = preprocess
         self.caption_samplers = caption_samplers
         self.clip_scoring = clip_scoring
-        self.gt_captions_by_image_id = dataset.annotations.get_captions_by_image_id()
+        self.gt_captions_by_image_id = dataset.get_index().get_captions_by_image_id()
         self.reset()
 
     def reset(self):
@@ -513,7 +513,6 @@ class CocoCaptionValidator(CaptionValidator):
         results['clip_score'] = np.mean(self.clip_scores)
         results['sampler_scores'] = sampler_scores
 
-        #print('eval_result', results)
         return results
 
     def load_image_by_id(self, image_id):
@@ -579,7 +578,7 @@ def evaluate(
         raise ValueError(f"invalid language model type '{language_model_type}' (expected 'gpt-j' / 'gpt2' / 't0' / 't5')")
 
     dataset = CocoImageDataset(annotation_json_path=valid_json_path, image_folder_path=image_folder_path)
-    gt_captions_by_image_id = dataset.annotations.get_captions_by_image_id()
+    gt_captions_by_image_id = dataset.get_index().get_captions_by_image_id()
 
     if prefix_only:
         model = CLIPCaptionPrefixOnly.load_from_checkpoint(checkpoint_path=checkpoint_path, language_model=language_model, tokenizer=tokenizer, validator=None, encode_image=encode_image, strict=False)
@@ -604,9 +603,6 @@ def evaluate(
 
     max_samples = 10
     for i,x in enumerate(tqdm(dataset, desc='inference')):
-        # image_entry = x['image_entry']
-        # image = x['image']
-
         dummy_batch = [x]
         validator.process(model, dummy_batch)
         if i+1 >= max_samples:
@@ -614,26 +610,6 @@ def evaluate(
 
     results = validator.get_results()
     print(results)
-
-        # print('image-url: ', image_entry.url)
-
-        # gt = gt_captions_by_image_id[image_entry.id]
-        # print('ground truth: ', gt)
-
-        # image_tensor = preprocess(image).to(device)
-        # caption = caption_sampler.sample(model, image_tensor)
-        # print('caption:', caption)
-
-
-    """
-        caption_hypo[image_entry.id] = [{'caption': caption}]
-        ground_truth_captions[image_entry.id] = [{'caption': caption} for caption in gt_captions_by_image_id[image_entry.id]]
-
-    # Calculate scores
-    scores, img_scores = generate_scores(ground_truth_captions, caption_hypo)
-    print("Scores")
-    print(scores)
-    """
 
 
 # parse bool args correctly, see https://stackoverflow.com/a/43357954

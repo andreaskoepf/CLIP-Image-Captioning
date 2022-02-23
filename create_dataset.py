@@ -1,22 +1,25 @@
 """ A modified version of clip_inference.py from rom1504/clip-retrieval """
 from dataclasses import dataclass
-from torch.utils.data.dataloader import default_collate
-from torch.utils.data import DataLoader, Dataset
-from PIL import Image, UnidentifiedImageError
-from clip.model import VisionTransformer
 from typing import Optional
 from pathlib import Path
 from io import BytesIO
+import io
+import json
+
+import torch
+from torch.utils.data.dataloader import default_collate
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode, to_tensor
+
+from PIL import Image, UnidentifiedImageError
 import numpy as np
 import fsspec
-import torch
-from torchvision import transforms
-from torchvision.transforms.functional import InterpolationMode
-import clip
-import json
 import tqdm
 import fire
-import io
+
+import clip
+from clip.model import VisionTransformer
 
 
 @dataclass
@@ -32,7 +35,24 @@ class CocoJsonCaptionEntry:
     image: CocoJsonImageEntry
 
 
-class CocoJsonDataset(Dataset):
+class DatasetIndexBase(Dataset):
+    def get_captions_by_image_id(self):
+        captions = {}
+        for entry in self:
+            if entry.image.id in captions:
+                captions[entry.image.id].append(entry.caption)
+            else:
+                captions[entry.image.id] = [entry.caption]
+        return captions
+    
+    def __len__(self):
+        raise NotImplementedError()
+
+    def __getitem__(self, index: int):
+        raise NotImplementedError()
+
+
+class CocoJsonDataset(DatasetIndexBase):
     """
     Non-standard dataset providing CocoJsonCaptionEntry objects. It is not used directly but aggregated by
     other Dataset classes (CocoImageDataset, CocoCaptionDataset) to access COCO captions read from the COCO
@@ -52,15 +72,6 @@ class CocoJsonDataset(Dataset):
         self.annotations = j["annotations"]
         print(f'total annotations: {len(self.annotations)}; total images: {len(image_by_id)};')
 
-    def get_captions_by_image_id(self):
-        captions = {}
-        for entry in self:
-            if entry.image.id in captions:
-                captions[entry.image.id].append(entry.caption)
-            else:
-                captions[entry.image.id] = [entry.caption]
-        return captions
-
     def __len__(self):
         return len(self.annotations)
 
@@ -74,26 +85,69 @@ class CocoJsonDataset(Dataset):
         return CocoJsonCaptionEntry(caption=caption, image=image)
 
 
-class CocoImageDataset(Dataset):
+class FileFolderIndexDataset(DatasetIndexBase):
+    def __init__(self, folder_path):
+        super().__init__()
+
+        path = Path(folder_path)
+
+        text_files = { fn.stem: fn for fn in path.glob("**/*.txt") }
+        
+        image_files = [
+            *path.glob("**/*.png"),
+            *path.glob("**/*.jpg"),
+            *path.glob("**/*.jpeg"),
+            *path.glob("**/*.bmp"),
+        ]
+        
+        image_files = { fn.stem: fn for fn in image_files }
+        keys = text_files.keys() & image_files.keys()   # intersection between text and image key sets
+
+        self.image_by_id = dict((k, CocoJsonImageEntry(id=k, file_name=v, url=None)) for k,v in image_files.items() if k in keys)
+        
+        self.keys = list(keys)
+        self.text_files = dict((k,v) for k,v in text_files.items() if k in keys)
+        self.keys = list(keys)
+        
+        print(f'total total images-text pairs: {len(self.image_by_id)};')
+
+    def __len__(self):
+        return len(self.keys)
+
+    def __getitem__(self, index: int):
+        key = self.keys[index]
+        image = self.image_by_id[key]
+        caption = self.text_files[key].read_text()
+        return CocoJsonCaptionEntry(caption=caption, image=image)
+
+
+class CocoImageDatasetBase(Dataset):
     """
     Dataset returning image tensors together with image entry objects. Mainly used for evaluating the model.  
     """
-    def __init__(self, annotation_json_path: str, image_folder_path: str, replace_extension: str = None):
+    def __init__(self, annotations: DatasetIndexBase, image_folder_path: str, replace_extension: str = None):
         super().__init__()
-        self.annotations = CocoJsonDataset(annotation_json_path)
+        self.annotations = annotations
         self.keys = list(self.annotations.image_by_id.keys())
-        self.image_folder_path = Path(image_folder_path)
+        self.image_folder_path = Path(image_folder_path) if isinstance(image_folder_path, str) else image_folder_path
         self.replace_extension = replace_extension
+
+    def get_index(self):
+        return self.annotations
 
     def __len__(self):
         return len(self.keys)
     
     def get_image_path_by_id(self, image_id):
         image_entry = self.annotations.image_by_id[image_id]
-        file_name = Path(image_entry.file_name)
+        file_path = image_entry.file_name
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
+        assert isinstance(file_path, Path)
+        parent_path = self.image_folder_path or file_path.parent
         if self.replace_extension is not None:
-            file_name = file_name.stem + self.replace_extension
-        return self.image_folder_path / file_name
+            file_path = file_path.stem + self.replace_extension
+        return parent_path / file_path
 
     def load_image_by_id(self, image_id):
         image_path = self.get_image_path_by_id(image_id)
@@ -115,11 +169,24 @@ class CocoImageDataset(Dataset):
         }
 
 
-class CocoCaptionDataset(Dataset):
-    def __init__(self, annotation_json_path: str, image_folder_path: str, tokenizer, image_transform, max_token_length: int = 128, replace_extension: str = None):
+class CocoImageDataset(CocoImageDatasetBase):
+    """
+    Dataset returning image tensors together with image entry objects. Mainly used for evaluating the model.  
+    """
+    def __init__(self, annotation_json_path: str, image_folder_path: str, replace_extension: str = None):
+        super().__init__(CocoJsonDataset(annotation_json_path), image_folder_path, replace_extension)
+
+
+class FolderImageDataset(CocoImageDatasetBase):
+    def __init__(self, folder_path: str):
+        super().__init__(FileFolderIndexDataset(folder_path), image_folder_path=None)
+
+
+class CocoCaptionDatasetBase(Dataset):
+    def __init__(self, annotations: DatasetIndexBase, image_folder_path: str, tokenizer, image_transform, max_token_length: int = 128, replace_extension: str = None):
         super().__init__()
-        self.annotations = CocoJsonDataset(annotation_json_path)
-        self.image_folder_path = Path(image_folder_path)
+        self.annotations = annotations
+        self.image_folder_path = Path(image_folder_path) if isinstance(image_folder_path, str) else image_folder_path
         self.image_transform = image_transform
         self.tokenizer = tokenizer
         self.max_token_length = max_token_length
@@ -132,13 +199,22 @@ class CocoCaptionDataset(Dataset):
         entry = self.annotations[index]
 
         caption = entry.caption
-        file_name = Path(entry.image.file_name)
+
+        file_path = entry.image.file_name
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
+        assert isinstance(file_path, Path)
+        parent_path = self.image_folder_path or file_path.parent
         if self.replace_extension is not None:
-            file_name = file_name.stem + self.replace_extension
-        image_path = self.image_folder_path / file_name
+            file_path = file_path.stem + self.replace_extension
+        image_path = parent_path / file_path
 
         try:
-            image_tensor = self.image_transform(Image.open(image_path).convert('RGB'))
+            image = Image.open(image_path).convert('RGB')
+            if self.image_transform is not None:
+                image_tensor = self.image_transform(image)
+            else:
+                image_tensor = to_tensor(image)
         except BaseException as err:
             print(f"Failed to load image '{image_path}' (error='{err}'; type(err)={type(err)}). Skipping.")
             return None  # return None to be filtered in the batch collate_fn
@@ -174,6 +250,16 @@ class CocoCaptionDataset(Dataset):
         else:
             raise ValueError(f"invalid tokenizer model type: '{tokenizer_model_type}' (expected gpt2/gpt-j/t0/t5)")
         return tokenizer
+
+
+class CocoCaptionDataset(CocoCaptionDatasetBase):
+    def __init__(self, annotation_json_path: str, image_folder_path: str, tokenizer, image_transform, max_token_length: int = 128, replace_extension: str = None):
+        super().__init__(CocoJsonDataset(annotation_json_path), image_folder_path, tokenizer, image_transform, max_token_length, replace_extension)
+
+
+class FolderCaptionDataset(CocoCaptionDatasetBase):
+    def __init__(self, folder_path: str, tokenizer, image_transform, max_token_length: int = 128):
+        super().__init__(FileFolderIndexDataset(folder_path), image_folder_path=None, tokenizer=tokenizer, image_transform=image_transform, max_token_length=max_token_length)
 
 
 class FileFolderDataset(Dataset):

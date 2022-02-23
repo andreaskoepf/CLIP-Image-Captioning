@@ -13,7 +13,7 @@ from torchvision.transforms.functional import InterpolationMode
 from model import CLIPCaptionModel, CLIPCaptionPrefixOnly
 from lms import GPT2, GPTJ, T0
 import clip
-from create_dataset import CocoCaptionDataset, CocoImageDataset
+from create_dataset import CocoCaptionDataset, CocoCaptionDatasetBase, CocoImageDataset, FolderCaptionDataset, FolderImageDataset
 from evaluate_model import ClipGuidedCaptionSampler, ClipScoring, CocoCaptionValidator, NoBeamCaptionSampler
 
 
@@ -47,11 +47,11 @@ class CheckpointSaver(pl.Callback):
 
 
 def train(
-    input_dataset: str,     # path of COCO train annotation json file
-    image_folder_path: str,
-    valid_json_path: str,   # path of COCO valid annotation json file
-    valid_image_folder_path: str,
-    validation_interval: int = 1000,
+    input_dataset: str=None,     # path of COCO train annotation json file
+    image_folder_path: str=None,
+    valid_json_path: str=None,   # path of COCO valid annotation json file
+    valid_image_folder_path: str=None,
+    validation_interval:float = 1000,
     max_token_length: int = 96,
     output_dir: str = "./models/",
     output_name_prefix: str = "demo_model.ckpt",
@@ -95,7 +95,7 @@ def train(
 
     print(f'Using pytorch version {torch.__version__}')
     print('Args: ', locals())
-
+    
     # Easier to use GPU args. `-1` = use all, `0` = use gpu 0, `0,1` = use gpus 1 and 2 etc.
     if isinstance(gpu_devices, str):
         gpu_devices = [int(x) for x in gpu_devices.split(',')]
@@ -140,9 +140,25 @@ def train(
     else:
         raise RuntimeError('Unsupported visual encdore \'{visual_encoder_type}\' specified.')
 
-    tokenizer = CocoCaptionDataset.create_tokenizer(tokenizer_model_type=language_model_type, tokenizer_model_variant=language_model_variant)
-    dataset = CocoCaptionDataset(annotation_json_path=input_dataset, image_folder_path=image_folder_path, image_transform=preprocess,
-        tokenizer=tokenizer, max_token_length=max_token_length, replace_extension=replace_extension)
+    tokenizer = CocoCaptionDatasetBase.create_tokenizer(tokenizer_model_type=language_model_type, tokenizer_model_variant=language_model_variant)
+    if input_dataset is not None:
+        dataset = CocoCaptionDataset(
+            annotation_json_path=input_dataset,
+            image_folder_path=image_folder_path,
+            image_transform=preprocess,
+            tokenizer=tokenizer,
+            max_token_length=max_token_length,
+            replace_extension=replace_extension
+        )
+    elif image_folder_path is not None:
+        dataset = FolderCaptionDataset(
+            image_folder_path,
+            tokenizer=tokenizer,
+            image_transform=preprocess,
+            max_token_length=max_token_length
+        )
+    else:
+        raise RuntimeError('Neither input_dataset nor image_folder_path was specified.')
 
     total_steps = len(dataset) // batch_size * epochs
 
@@ -179,25 +195,34 @@ def train(
     # prepare model validator
     val_clip_model = "ViT-B/32"
     clip_model, clip_image_preprocess = clip.load(val_clip_model, device=device, jit=False)
-    validation_dataset = CocoImageDataset(annotation_json_path=valid_json_path, image_folder_path=valid_image_folder_path, replace_extension=replace_extension)
+    if valid_json_path is not None:
+        validation_dataset = CocoImageDataset(annotation_json_path=valid_json_path, image_folder_path=valid_image_folder_path, replace_extension=replace_extension)
+    elif valid_image_folder_path is not None:
+        validation_dataset = FolderImageDataset(valid_image_folder_path)
+    else:
+        validation_dataset = None
 
     def validation_collate(batch):
         """directly pass on PIL images"""
         return batch
 
-    validation_dataloader = DataLoader(validation_dataset, batch_size=1, shuffle=False, collate_fn=validation_collate, pin_memory=False)
-    nobeam_sampler = NoBeamCaptionSampler(top_p_values=[0.1, 0.2])
-    clip_scoring = ClipScoring(clip_model, clip_image_preprocess)
-    clip_guided_sampler = ClipGuidedCaptionSampler(clip_scoring, branching_factor=2, look_ahead=4)
-    validator = CocoCaptionValidator(
-        validation_dataset,
-        preprocess,
-        {
-            'nobeam': nobeam_sampler,
-            'clip_guided': clip_guided_sampler
-        },
-        clip_scoring
-    )
+    if validation_dataset is not None:
+        validation_dataloader = DataLoader(validation_dataset, batch_size=1, shuffle=False, collate_fn=validation_collate, pin_memory=False)
+        nobeam_sampler = NoBeamCaptionSampler(top_p_values=[0.1, 0.2])
+        clip_scoring = ClipScoring(clip_model, clip_image_preprocess)
+        clip_guided_sampler = ClipGuidedCaptionSampler(clip_scoring, branching_factor=2, look_ahead=4)
+        validator = CocoCaptionValidator(
+            validation_dataset,
+            preprocess,
+            {
+                'nobeam': nobeam_sampler,
+                'clip_guided': clip_guided_sampler
+            },
+            clip_scoring
+        )
+    else:
+        validator = None
+        validation_dataloader = None
 
     if prefix_only:
         language_model = language_model.eval()
