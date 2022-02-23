@@ -1,5 +1,6 @@
 """ A modified version of clip_inference.py from rom1504/clip-retrieval """
 from dataclasses import dataclass
+import re
 from typing import Optional
 from pathlib import Path
 from io import BytesIO
@@ -118,6 +119,7 @@ class FileFolderIndexDataset(DatasetIndexBase):
         key = self.keys[index]
         image = self.image_by_id[key]
         caption = self.text_files[key].read_text()
+        caption = re.sub("\s+", " ", caption)
         return CocoJsonCaptionEntry(caption=caption, image=image)
 
 
