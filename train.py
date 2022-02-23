@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Union
 from pathlib import Path
 import fire
 import pytorch_lightning as pl
@@ -51,7 +51,7 @@ def train(
     image_folder_path: str=None,
     valid_json_path: str=None,   # path of COCO valid annotation json file
     valid_image_folder_path: str=None,
-    validation_interval:float = 1000,
+    validation_interval:Union[int, float] = 1000,
     max_token_length: int = 96,
     output_dir: str = "./models/",
     output_name_prefix: str = "demo_model.ckpt",

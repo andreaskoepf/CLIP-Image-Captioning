@@ -110,7 +110,7 @@ class FileFolderIndexDataset(DatasetIndexBase):
         self.text_files = dict((k,v) for k,v in text_files.items() if k in keys)
         self.keys = list(keys)
         
-        print(f'total total images-text pairs: {len(self.image_by_id)};')
+        print(f'total images-text pairs: {len(self.image_by_id)};')
 
     def __len__(self):
         return len(self.keys)
