@@ -2,7 +2,6 @@ from typing import Dict, Union, Tuple, List, Optional
 import inspect
 import argparse
 import json
-from unittest import result
 from tqdm import tqdm
 
 import numpy as np
@@ -13,7 +12,6 @@ from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 
 import clip
-from clip.model import VisionTransformer
 from create_dataset import CocoImageDataset
 from model import CLIPCaptionModel, CLIPCaptionPrefixOnly, CaptionValidator
 from lms import (
@@ -629,9 +627,7 @@ def parse_args():
     parser.add_argument('--device', default='cuda', type=str, help='device to use')
     parser.add_argument('--device-index', default=0, type=int, help='device index')
     parser.add_argument('--manual_seed', default=42, type=int, help='initialization of pseudo-RNG')
-    parser.add_argument('--batch_size', default=96, type=int, help='batch size')
     parser.add_argument('--clip_model', default= "ViT-B/32", type=str, help="available models = ['RN50', 'RN101', 'RN50x4', 'RN50x16', 'RN50x64', 'ViT-B/32', 'ViT-B/16', 'ViT-L/14']")
-    parser.add_argument('--use_all_vit_features', default=True, type=str2bool)
     parser.add_argument('--language_model_type', default="gpt2", type=str)
     parser.add_argument('--language_model_variant', default="gpt2", type=str, help='gpt2, gpt2-xl')
     parser.add_argument('--prefix_only', default=False, type=str2bool)

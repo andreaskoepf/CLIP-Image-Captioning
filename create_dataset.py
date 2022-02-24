@@ -68,7 +68,8 @@ class CocoJsonDataset(DatasetIndexBase):
         images = j["images"]
         image_by_id = dict()
         for img in images:
-            image_by_id[img['id']] = CocoJsonImageEntry(id=img['id'], file_name=img['file_name'], url=img['coco_url'])
+            url = img['coco_url'] if 'coco_url' in img else None
+            image_by_id[img['id']] = CocoJsonImageEntry(id=img['id'], file_name=img['file_name'], url=url)
         self.image_by_id = image_by_id
         self.annotations = j["annotations"]
         print(f'total annotations: {len(self.annotations)}; total images: {len(image_by_id)};')

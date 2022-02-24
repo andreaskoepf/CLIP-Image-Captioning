@@ -89,7 +89,8 @@ def train(
     num_workers: int=8,
     max_log_samples: int=64,
     autoclip_p: int=10,
-    enable_checkpointing: bool=False
+    enable_checkpointing: bool=False,
+    acc_grad_batches: int=1
 ):
     """ Starts the main training process. """ # TODO arg docs.
 
@@ -275,7 +276,8 @@ def train(
         val_check_interval=validation_interval,
         check_val_every_n_epoch=1,
         limit_val_batches=100,
-        enable_checkpointing=enable_checkpointing
+        enable_checkpointing=enable_checkpointing,
+        accumulate_grad_batches=acc_grad_batches
     )
 
     # Run training process.
