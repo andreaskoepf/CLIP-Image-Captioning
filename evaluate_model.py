@@ -110,6 +110,7 @@ def generate_no_beam(
     temperature: float = 1.0,
     stop_token: str = '.',
     repetition_penalty: float = 1.2,
+    max_stops = 3
 ):
     assert max_decode_length <= 77, "maximum context length for CLIP models is 77"
 
@@ -127,6 +128,7 @@ def generate_no_beam(
         for top_p in top_p_values:
             tokens = None
             embeds = embeds_init
+            stops = 0
             for _ in range(max_decode_length):
                 # Get logits from a forward pass
                 outputs = model.language_model.call(inputs_embeds=embeds)
@@ -156,7 +158,9 @@ def generate_no_beam(
                     tokens = torch.cat((tokens, next_token), dim=1)
                 embeds = torch.cat((embeds, next_token_embed), dim=1)
 
-                if stop_token == next_token.item() or next_token.item() in special_tokens:
+                if stop_token == next_token.item():
+                    stops += 1
+                if stops >= max_stops or next_token.item() in special_tokens: 
                     break
 
             output_list = list(tokens.squeeze(0).cpu().numpy())
@@ -177,7 +181,6 @@ def generate_clip_guided(
     text_prefix_tokens: Optional[torch.Tensor] = None,
     max_decode_length: int = 75,
     temperature: float = 1.0,
-    stop_token: str = '.',
     repetition_penalty: float = 1.2,
     look_ahead = 5,
     branching_factor = 3,
@@ -190,7 +193,6 @@ def generate_clip_guided(
 
     tokenizer = model.tokenizer
     special_tokens = tokenizer.all_special_ids
-    stop_token = tokenizer.encode_text(stop_token)[0]
 
     greedy = True
     top_p = 0.1
@@ -232,7 +234,7 @@ def generate_clip_guided(
             #print('next_token_embed', next_token_embed.shape)
             next_embeds = torch.cat((embeds, next_token_embed), dim=1)
 
-            stop = next_token.item() == stop_token or next_token.item() in special_tokens
+            stop = next_token.item() in special_tokens
             if remaining_depth == 0 or stop:
                 candidates.append((next_tokens, next_embeds, stop))
             else:
@@ -639,7 +641,7 @@ def parse_args():
     parser.add_argument('--visual_encoder_type', type=str, default='BLIP')
     parser.add_argument('--visual_encoder_model_variant', type=str, default='ViT-B')
 
-    parser.add_argument('--checkpoint_path', type=str, default='./out/005_final.ckpt')
+    parser.add_argument('--checkpoint_path', type=str, default='./out/006_0.ckpt')
 
     opt = parser.parse_args()
     return opt
