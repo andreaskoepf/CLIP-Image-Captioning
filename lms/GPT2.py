@@ -22,12 +22,26 @@ class GPT2(GPT2LMHeadModel):
 class GPT2_Tokenizer(GPT2Tokenizer):
     @classmethod
     def create(cls, model_variant: str = "gpt2-xl", **huggingface_kwargs):
-        return cls.from_pretrained(model_variant, **huggingface_kwargs)
-    
-    def encode_text(self, text: str, max_token_length: Optional[int] = None) -> List[int]:
+        tokenizer = cls.from_pretrained(model_variant, **huggingface_kwargs)
+        return tokenizer
+
+    def encode_text(self, text: str, max_token_length: Optional[int] = None, add_bos: bool = False, add_eos: bool = False) -> List[int]:
+        if max_token_length is not None:
+            if add_bos:
+                max_token_length += 1
+            if add_eos:
+                max_token_length += 1
+
         tokens = self.encode(text)
         if max_token_length is not None:
             tokens = tokens[:max_token_length]
+
+        if add_bos:
+            tokens = [self.bos_token_id] + tokens
+
+        if add_eos:
+            tokens = tokens + [self.eos_token_id]
+        
         return tokens
     
     def decode_tokens(self, tokens: List[int]) -> str:
