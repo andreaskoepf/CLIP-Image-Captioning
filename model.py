@@ -126,7 +126,7 @@ class CLIPCaptionModel(pl.LightningModule):
     
     def forward(self, tokens: torch.Tensor, prefix: torch.Tensor, mask: Optional[torch.Tensor] = None,
                 labels: Optional[torch.Tensor] = None):
-            
+
         embedding_text = self.language_model.get_embedding_text(tokens)
 
         prefix_projections = self.clip_project(prefix)

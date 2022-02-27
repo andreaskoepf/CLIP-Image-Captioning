@@ -119,6 +119,14 @@ def generate_no_beam(
     stop_token = tokenizer.encode_text(stop_token)[0]
     generations = []
 
+    # ## BOS test
+    # prepend BOS token
+    bos = torch.empty(embeds.shape[0], 1, device=embeds.device, dtype=torch.int64).fill_(tokenizer.bos_token_id)
+    if text_prefix_tokens is None:
+        text_prefix_tokens = bos
+    else:
+        text_prefix_tokens = torch.cat((bos, text_prefix_tokens), dim=1)
+
     with torch.no_grad():
         if text_prefix_tokens is not None:
             text_prefix_embed = model.language_model.get_embedding_text(text_prefix_tokens)
@@ -239,6 +247,14 @@ def generate_clip_guided(
                 candidates.append((next_tokens, next_embeds, stop))
             else:
                 recursive_branching_topk(candidates, next_embeds, next_tokens, branching_factor, remaining_depth-1)
+
+    # prepend BOS token
+    # ## BOS test 
+    bos = torch.empty(embeds.shape[0], 1, device=embeds.device, dtype=torch.int64).fill_(tokenizer.bos_token_id)
+    if text_prefix_tokens is None:
+        text_prefix_tokens = bos
+    else:
+        text_prefix_tokens = torch.cat((bos, text_prefix_tokens), dim=1)
 
     if text_prefix_tokens is not None:
         text_prefix_embed = model.language_model.get_embedding_text(text_prefix_tokens)
@@ -482,9 +498,9 @@ class CocoCaptionValidator(CaptionValidator):
         image_batch = torch.stack(image_tensors, dim=0)
         prefixes = model.encode_image(image_batch)
 
-        min_cap_per_img = min(len(x) for x in image_captions_gt)
+        min_cap_per_img = min(len(x) for x in image_captions_gt)    # all entries in batch have >= min_cap_per_img captions 
         for i in range(min_cap_per_img):
-            encoded_text = [torch.tensor(model.tokenizer.encode_text(c[i]), dtype=torch.int64) for c in image_captions_gt]
+            encoded_text = [torch.tensor(model.tokenizer.encode_text(c[i], add_bos=True, add_eos=True), dtype=torch.int64) for c in image_captions_gt]
             max_len = max(s.shape[-1] for s in encoded_text)
             tokens = torch.zeros(len(encoded_text), max_len, dtype=torch.int64)
             for i,t in enumerate(encoded_text):

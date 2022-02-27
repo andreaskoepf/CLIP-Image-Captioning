@@ -90,7 +90,8 @@ def train(
     max_log_samples: int=64,
     autoclip_p: int=10,
     enable_checkpointing: bool=False,
-    acc_grad_batches: int=1
+    acc_grad_batches: int=1,
+    gradient_checkpointing_enable: bool=True
 ):
     """ Starts the main training process. """ # TODO arg docs.
 
@@ -104,6 +105,8 @@ def train(
         gpu_devices = [gpu_devices]
     if gpu_devices[0] == -1:
         gpu_devices = -1
+
+    tokenizer = CocoCaptionDatasetBase.create_tokenizer(tokenizer_model_type=language_model_type, tokenizer_model_variant=language_model_variant)
 
     if visual_encoder_type == 'BLIP':
         if visual_encoder_model_variant == 'ViT-B':
@@ -141,7 +144,7 @@ def train(
     else:
         raise RuntimeError('Unsupported visual encdore \'{visual_encoder_type}\' specified.')
 
-    tokenizer = CocoCaptionDatasetBase.create_tokenizer(tokenizer_model_type=language_model_type, tokenizer_model_variant=language_model_variant)
+    
     if input_dataset is not None:
         dataset = CocoCaptionDataset(
             annotation_json_path=input_dataset,
@@ -187,11 +190,14 @@ def train(
     if language_model_type == "gpt2":
         language_model = GPT2.create(language_model_variant)
     elif language_model_type in ("gptj", "gpt-j"):
-        language_model = GPTJ.create(language_model_variant)
+        language_model = GPTJ.create(language_model_variant, )
     elif language_model_type in ("t0", "t5"):
         language_model = T0.create(language_model_variant)
     else:
         raise ValueError(f"invalid language model type '{language_model_type}' (expected 'gpt-j' / 'gpt2' / 't0' / 't5')")
+
+    if gradient_checkpointing_enable:
+        language_model.gradient_checkpointing_enable()
 
     # prepare model validator
     val_clip_model = "ViT-B/32"
