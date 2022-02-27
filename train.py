@@ -188,9 +188,9 @@ def train(
     }
 
     if language_model_type == "gpt2":
-        language_model = GPT2.create(language_model_variant)
+        language_model = GPT2.create(language_model_variant, use_cache=False)
     elif language_model_type in ("gptj", "gpt-j"):
-        language_model = GPTJ.create(language_model_variant, )
+        language_model = GPTJ.create(language_model_variant)
     elif language_model_type in ("t0", "t5"):
         language_model = T0.create(language_model_variant)
     else:
