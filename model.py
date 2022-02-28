@@ -26,7 +26,7 @@ class CLIPCaptionModel(pl.LightningModule):
     def __init__(self,
         language_model: Union[GPT2, GPTJ, T0],
         tokenizer,
-        encode_image,
+        visual_encoder,
         validator: CaptionValidator, 
         autoclip_p: int=10,
         max_log_samples: int=64,
@@ -41,7 +41,12 @@ class CLIPCaptionModel(pl.LightningModule):
         self.tokenizer = tokenizer
         self.lm_embedding_size = self.language_model.get_embedding_size()
 
-        self.encode_image = encode_image
+        self.visual_encoder = visual_encoder
+        if not self.hparams.train_visual_encoder:
+            visual_encoder.eval()
+            for param in visual_encoder.parameters():
+                param.requires_grad = False
+
         self.autoclip = AutoClip(percentile=autoclip_p)
         self.validator = validator
 
@@ -188,7 +193,12 @@ class CLIPCaptionModel(pl.LightningModule):
         image_tensor = batch["image_tensor"]
         tokens = batch["tokens"]
 
-        prefix = self.encode_image(image_tensor)
+        if self.hparams.train_visual_encoder:
+            prefix = self.visual_encoder(image_tensor)
+        else:
+            with torch.no_grad():
+                self.visual_encoder.eval()
+                prefix = self.visual_encoder(image_tensor)
 
         mask = tokens.ge(0)  # mask is zero where we out of sequence
         tokens[~mask] = 0

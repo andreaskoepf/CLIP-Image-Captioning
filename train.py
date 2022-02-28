@@ -91,7 +91,8 @@ def train(
     autoclip_p: int=10,
     enable_checkpointing: bool=False,
     acc_grad_batches: int=1,
-    gradient_checkpointing_enable: bool=True
+    gradient_checkpointing_enable: bool=True,
+    train_visual_encoder: bool=False
 ):
     """ Starts the main training process. """ # TODO arg docs.
 
@@ -131,16 +132,13 @@ def train(
         from BLIP.models.blip import blip_decoder
 
         blip_model = blip_decoder(pretrained=blip_model_url, image_size=image_size, vit='base', med_config='BLIP/configs/med_config.json')
-        blip_model.eval()
+        #blip_model.eval()
 
-        device = torch.device('cuda', max(gpu_devices if isinstance(gpu_devices, int) else gpu_devices[0], 0))
-        blip_model = blip_model.to(device)
+        #device = torch.device('cuda', max(gpu_devices if isinstance(gpu_devices, int) else gpu_devices[0], 0))
+        #blip_model = blip_model.to(device)
 
-        def blip_encode(image):
-            with torch.no_grad():
-                return blip_model.visual_encoder(image)
+        visual_encoder = blip_model.visual_encoder
 
-        encode_image = blip_encode
     else:
         raise RuntimeError('Unsupported visual encdore \'{visual_encoder_type}\' specified.')
 
@@ -169,6 +167,9 @@ def train(
     model_kwargs = {
         "language_model_type": language_model_type,
         "language_model_variant": language_model_variant,
+        "visual_encoder_type": visual_encoder_type,
+        "visual_encoder_model_variant": visual_encoder_model_variant,
+        "train_visual_encoder": train_visual_encoder,
         "prefix_length": prefix_length,
         "clip_prefix_length": clip_prefix_length,
         "prefix_size": prefix_size,
@@ -201,6 +202,7 @@ def train(
 
     # prepare model validator
     val_clip_model = "ViT-B/32"
+    device = torch.device('cuda', max(gpu_devices if isinstance(gpu_devices, int) else gpu_devices[0], 0))
     clip_model, clip_image_preprocess = clip.load(val_clip_model, device=device, jit=False)
     if valid_json_path is not None:
         validation_dataset = CocoImageDataset(annotation_json_path=valid_json_path, image_folder_path=valid_image_folder_path, replace_extension=replace_extension)
@@ -236,10 +238,10 @@ def train(
         for param in language_model.parameters():
             param.requires_grad = False
 
-        model = CLIPCaptionPrefixOnly(language_model, tokenizer, encode_image, validator=validator, autoclip_p=autoclip_p, **model_kwargs)
+        model = CLIPCaptionPrefixOnly(language_model, tokenizer, visual_encoder, validator=validator, autoclip_p=autoclip_p, **model_kwargs)
         print("Train only Prefix.")
     else:
-        model = CLIPCaptionModel(language_model, tokenizer, encode_image, validator=validator, autoclip_p=autoclip_p, **model_kwargs)
+        model = CLIPCaptionModel(language_model, tokenizer, visual_encoder, validator=validator, autoclip_p=autoclip_p, **model_kwargs)
         print("Train both Prefix and Language Model.")
 
     # Create `CheckpointSaver` as a trainer callback instance.

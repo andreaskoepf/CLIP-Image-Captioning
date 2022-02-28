@@ -356,7 +356,7 @@ class CaptionSamplerBase:
     def sample(self, model, image_tensor, image):
         if image_tensor.dim() == 3:
             image_tensor = image_tensor.unsqueeze(0)
-        image_embedding = model.encode_image(image_tensor)
+        image_embedding = model.visual_encoder(image_tensor)
         prefix = model.clip_project(image_embedding)
         return self.generate_captions(model, prefix, image_embedding, image)
 
@@ -496,7 +496,7 @@ class CocoCaptionValidator(CaptionValidator):
 
         # evaluate loss of model
         image_batch = torch.stack(image_tensors, dim=0)
-        prefixes = model.encode_image(image_batch)
+        prefixes = model.visual_encoder(image_batch)
 
         min_cap_per_img = min(len(x) for x in image_captions_gt)    # all entries in batch have >= min_cap_per_img captions 
         for i in range(min_cap_per_img):
@@ -571,12 +571,7 @@ def evaluate(
         blip_model.eval()
 
         blip_model = blip_model.to(device)
-
-        def blip_encode(image):
-            with torch.no_grad():
-                return blip_model.visual_encoder(image)
-
-        encode_image = blip_encode
+        visual_encoder = blip_model.visual_encoder
     else:
         raise RuntimeError('Unsupported visual encdore \'{visual_encoder_type}\' specified.')
 
@@ -597,9 +592,9 @@ def evaluate(
     gt_captions_by_image_id = dataset.get_index().get_captions_by_image_id()
 
     if prefix_only:
-        model = CLIPCaptionPrefixOnly.load_from_checkpoint(checkpoint_path=checkpoint_path, language_model=language_model, tokenizer=tokenizer, validator=None, encode_image=encode_image, strict=False)
+        model = CLIPCaptionPrefixOnly.load_from_checkpoint(checkpoint_path=checkpoint_path, language_model=language_model, tokenizer=tokenizer, validator=None, visual_encoder=visual_encoder, strict=False)
     else:
-        model = CLIPCaptionModel.load_from_checkpoint(checkpoint_path=checkpoint_path, language_model=language_model, tokenizer=tokenizer, encode_image=encode_image, validator=None, strict=False)
+        model = CLIPCaptionModel.load_from_checkpoint(checkpoint_path=checkpoint_path, language_model=language_model, tokenizer=tokenizer, visual_encoder=visual_encoder, validator=None, strict=False)
 
     model.to(device)
     model.eval()
