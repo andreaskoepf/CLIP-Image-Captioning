@@ -171,7 +171,7 @@ def generate_no_beam(
                 if stops >= max_stops or next_token.item() in special_tokens: 
                     break
 
-            output_list = list(tokens.squeeze(0).cpu().numpy())
+            output_list = list(x for x in tokens.squeeze(0).cpu().numpy() if x not in special_tokens)
             output_text = tokenizer.decode_tokens(output_list)
 
             generations.append(output_text)
@@ -304,7 +304,7 @@ def generate_clip_guided(
             if stop or tokens.shape[-1] >= max_decode_length:
                 break
 
-    output_list = list(tokens.squeeze().cpu().numpy())
+    output_list = list(x for x in tokens.squeeze().cpu().numpy() if x not in special_tokens)
     output_text = tokenizer.decode_tokens(output_list)
     #print(output_list, output_text)
     return output_text
