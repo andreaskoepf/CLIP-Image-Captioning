@@ -107,6 +107,7 @@ def generate(
     min_length,
     max_length,
     repetition_penalty: Optional[float] = None,
+    min_alternate_prob=0
 ):
     # run until max or no candidates remaining
     total_max_length = max_length.max()
@@ -137,11 +138,25 @@ def generate(
         last_token_logits = top_k_top_p_filtering_batch(last_token_logits, top_p=top_p, top_k=top_k)
         
         p = F.softmax(last_token_logits, dim=-1)
-        next_token = torch.multinomial(p, 1, replacement=False)
+        next_token_samples = torch.multinomial(p, 2, replacement=False) # [40, 2]
 
+        next_token = next_token_samples[:, :1]
         completed = torch.logical_or(next_token.squeeze(-1) == eos_token_id, max_length <= i)
         if torch.any(completed):
             results.append([inputs[completed], min_length[completed], max_length[completed], top_p[completed]])
+
+            # check possible replacements            
+            if min_alternate_prob > 0:
+                potential_continue = torch.logical_and(completed, max_length > i)
+                if torch.any(potential_continue):
+                    alternate_sample = next_token_samples[:, 1:]        
+                    alternate_probs = torch.gather(p, -1, alternate_sample)     # get probability of alternate sample
+                    potential_continue = torch.logical_and(potential_continue, alternate_sample.squeeze(-1) != eos_token_id)
+                    potential_continue = torch.logical_and(potential_continue, alternate_probs.squeeze(-1) > min_alternate_prob)
+                    if torch.any(potential_continue):
+                        next_token[potential_continue] = alternate_sample[potential_continue]
+                        completed = torch.logical_and(completed, torch.logical_not(potential_continue))
+
             not_completed = torch.logical_not(completed)
             inputs = inputs[not_completed]
             next_token = next_token[not_completed]
@@ -163,7 +178,7 @@ def generate(
 
 
 @torch.no_grad()
-def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_len=0, prompt='a picture of '):
+def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_len=0, repetition_penalty=1.4, prompt='a picture of ', unique=True):
     batch_size = image.size(0)
     device = image.device
     image_embeds = blip_model.visual_encoder(image)
@@ -176,7 +191,7 @@ def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_l
     
     prompt_ = [prompt] * batch_size
     input_ids = blip_model.tokenizer(prompt_, return_tensors="pt").input_ids.to(device)
-    input_ids[:,0] = bos_token_id  # replace begin token 
+    input_ids[:,0] = bos_token_id   # replace begin token 
     input_ids = input_ids[:, :-1]   # remove end token
     input_ids = input_ids.repeat_interleave(sample_count, dim=0)
 
@@ -186,15 +201,17 @@ def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_l
         top_k=top_k,
         min_length=min_len,
         max_length=max_len,
-        repetition_penalty=1.4)
+        repetition_penalty=repetition_penalty)
 
     captions = []
     parameters = []
     for output in outputs:
         for i,o in enumerate(output[0]):
             caption = blip_model.tokenizer.decode(o, skip_special_tokens=True)
-            captions.append(caption[len(prompt):])  # remove prompt
-            parameters.append([output[1][i].item(), output[2][i].item(), output[3][i].item()])
+            caption_without_prompt = caption[len(prompt):]
+            if unique and caption_without_prompt not in captions:
+                captions.append(caption[len(prompt):])  # remove prompt
+                parameters.append([output[1][i].item(), output[2][i].item(), output[3][i].item()])
     return captions, parameters
 
 
@@ -218,29 +235,31 @@ def main():
     model.eval()
     model = model.to(device)
 
-    clip_model_name1="ViT-L/14"
+    clip_model_name1 = "ViT-L/14"
     clip_model1, clip_preprocess1 = clip.load(clip_model_name1, device=device)
 
-    clip_model_name2="RN50x64"
+    clip_model_name2 = "RN50x64"
     clip_model2, clip_preprocess2 = clip.load(clip_model_name2, device=device0)
    
     best_parameters = []
 
     files = glob.glob("./images/image-photo/*.jpg")
     for f in files:
-        print(f)
+        print(f'Image file: ', f)
         raw_image = Image.open(f).convert('RGB')   
         w,h = raw_image.size
 
         image = transform(raw_image).unsqueeze(0).to(device)     
     
         #top_k = 5000
-        top_k = 1000
+        top_k = 2500
         #top_p = 0.3
         
-        top_p = torch.tensor(([0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]*5), device=device)
+        top_p = torch.tensor(([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]*5), device=device)
+        #top_p = torch.tensor([0.3]*40, device=device)
         min_len = torch.tensor(([5]*8 + [10]*8 + [15]*8 + [20]*8 + [30]*8), device=device)
-        max_len = torch.tensor(([20]*8 + [30]*8 + [30]*8 + [45]*8 + [45]*8), device=device)
+        #max_len = torch.tensor(([20]*8 + [30]*8 + [30]*8 + [45]*8 + [45]*8), device=device)
+        max_len = torch.tensor(([45]*40), device=device)
 
         #top_p = torch.tensor(([0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.8, 0.85, 0.9, 0.95]) * 2, device=device)
         #min_len = torch.tensor(([10]*18 + [25]*18), device=device)
@@ -255,29 +274,40 @@ def main():
         captions,p = sample(image, model, sample_count=min_len.size(0), top_p=top_p, top_k=top_k, min_len=min_len, max_len=max_len, prompt='a picture of ')
         duration = time.time() - start
         
-        for i,c in enumerate(captions):
-            print(i, c)
-        print(f'took: {duration:.2f}s')
+        # print all candidates
+        # for i,c in enumerate(captions):
+        #     print(i, c)
+
+        #print(f'took: {duration:.2f}s')
 
         sims = clip_rank(device, clip_model1, clip_preprocess1, raw_image, captions)
-        print('sims:', sims)
-        top_indices = np.argsort(np.asarray(sims))[-5:]
+        #print('sims:', sims)
+        top_indices = np.argsort(np.asarray(sims))[-5:][::-1]
         argmax_ = top_indices[-1]
         best_captions = [captions[i] for i in top_indices]
         best_params = [p[i] for i in top_indices]
 
-        print('Filtered:')
+        print(f'Stage 1 ({clip_model_name1}):')
         for i in range(len(best_captions)):
-            print(f'{i}: {best_captions[-i-1]}')
+            print(f'{i} [{sims[top_indices[i]]:.3f}]: {best_captions[-i-1]}')
 
         sims2 = clip_rank(device0, clip_model2, clip_preprocess2, raw_image, best_captions)
+        top_indices2 = np.argsort(np.asarray(sims2))[-3:][::-1]
         best_index = np.argmax(np.asarray(sims2))
-        print('top1:', best_index)
-        print(best_captions[best_index])
-        best_parameters.append(best_params[best_index])
+        
+        best_captions2 = [best_captions[i] for i in top_indices2]
+        print(f'Stage 2 ({clip_model_name2}):')
+        for i in range(len(best_captions2)):
+            print(f'{i} [{sims2[top_indices2[i]]:.3f}]: {best_captions2[-i-1]}')
 
-        duration2 = time.time() - start
-        print(f'took (incl. clip filtering): {duration2:.2f}s')
+        print()
+        #print('top1:', best_index)
+        #print(best_captions[best_index])
+        #best_parameters.append(best_params[best_index])
+
+        # print timing
+        #duration2 = time.time() - start
+        #print(f'Done. Duration (incl. scoring): {duration2:.2f}s')
 
         continue
 
