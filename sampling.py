@@ -137,13 +137,12 @@ def generate(
         last_token_logits = top_k_top_p_filtering_batch(last_token_logits, top_p=top_p, top_k=top_k)
         
         p = F.softmax(last_token_logits, dim=-1)
-        next_token = torch.multinomial(p, 1)
+        next_token = torch.multinomial(p, 1, replacement=False)
 
         completed = torch.logical_or(next_token.squeeze(-1) == eos_token_id, max_length <= i)
         if torch.any(completed):
-            results.append(inputs[completed])
+            results.append([inputs[completed], min_length[completed], max_length[completed], top_p[completed]])
             not_completed = torch.logical_not(completed)
-
             inputs = inputs[not_completed]
             next_token = next_token[not_completed]
             if type(top_p) == torch.Tensor:
@@ -158,7 +157,7 @@ def generate(
         inputs = torch.cat([inputs, next_token], dim=-1)
 
     if inputs.size(0) > 0:
-        results.append(inputs)
+        results.append([inputs, min_length, max_length, top_p])
 
     return results
 
@@ -189,12 +188,14 @@ def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_l
         max_length=max_len,
         repetition_penalty=1.4)
 
-    captions = []  
+    captions = []
+    parameters = []
     for output in outputs:
-        for o in output:
+        for i,o in enumerate(output[0]):
             caption = blip_model.tokenizer.decode(o, skip_special_tokens=True)
             captions.append(caption[len(prompt):])  # remove prompt
-    return captions
+            parameters.append([output[1][i].item(), output[2][i].item(), output[3][i].item()])
+    return captions, parameters
 
 
 def main():
@@ -226,19 +227,24 @@ def main():
     best_parameters = []
 
     files = glob.glob("./images/image-photo/*.jpg")
-    for f in files[:40]:
+    for f in files:
         print(f)
         raw_image = Image.open(f).convert('RGB')   
         w,h = raw_image.size
 
         image = transform(raw_image).unsqueeze(0).to(device)     
     
-        top_k = 5000
-        top_p = 0.3
-        #top_p = torch.tensor(([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]*4), device=device)
-        #top_p = torch.tensor(([0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7]) * 2, device=device)
-        min_len = torch.tensor(([10]*7 + [15]*7 + [25]*7 + [30]*7), device=device)
-        max_len = torch.tensor(([30]*7 + [30]*7 + [45]*7 + [45]*7), device=device)
+        #top_k = 5000
+        top_k = 1000
+        #top_p = 0.3
+        
+        top_p = torch.tensor(([0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]*5), device=device)
+        min_len = torch.tensor(([5]*8 + [10]*8 + [15]*8 + [20]*8 + [30]*8), device=device)
+        max_len = torch.tensor(([20]*8 + [30]*8 + [30]*8 + [45]*8 + [45]*8), device=device)
+
+        #top_p = torch.tensor(([0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.8, 0.85, 0.9, 0.95]) * 2, device=device)
+        #min_len = torch.tensor(([10]*18 + [25]*18), device=device)
+        #max_len = torch.tensor(([45]*36), device=device)
 
         # print('top_k', top_k)
         # print('top_p', top_p)
@@ -246,7 +252,7 @@ def main():
         # print('max_len', max_len)
 
         start = time.time()
-        captions = sample(image, model, sample_count=min_len.size(0), top_p=top_p, top_k=top_k, min_len=min_len, max_len=max_len, prompt='a picture of ')
+        captions,p = sample(image, model, sample_count=min_len.size(0), top_p=top_p, top_k=top_k, min_len=min_len, max_len=max_len, prompt='a picture of ')
         duration = time.time() - start
         
         for i,c in enumerate(captions):
@@ -258,6 +264,7 @@ def main():
         top_indices = np.argsort(np.asarray(sims))[-5:]
         argmax_ = top_indices[-1]
         best_captions = [captions[i] for i in top_indices]
+        best_params = [p[i] for i in top_indices]
 
         print('Filtered:')
         for i in range(len(best_captions)):
@@ -267,11 +274,11 @@ def main():
         best_index = np.argmax(np.asarray(sims2))
         print('top1:', best_index)
         print(best_captions[best_index])
+        best_parameters.append(best_params[best_index])
 
         duration2 = time.time() - start
         print(f'took (incl. clip filtering): {duration2:.2f}s')
 
-        #model.generate(image, sample=True, num_beams=64, max_length=30, min_length=10, top_p=topP, repetition_penalty=rep_pen)
         continue
 
         captions = []
@@ -314,46 +321,8 @@ def main():
                     #def generate(self, image, sample=False, num_beams=3, max_length=30, min_length=10, top_p=0.9, repetition_penalty=1.0)
                     captions.append((caption, {'sample': False, 'num_beams': beam_n, 'max_length': 45, 'min_length': 30, 'top_p': 0.9}))
 
-            best_candidates = []
-            sims = clip_rank(device, clip_model, clip_preprocess, raw_image, [x[0] for x in captions])
-            print('sims:', sims)
-            top3_indices = np.argsort(np.asarray(sims))[-3:]
-            argmax_ = top3_indices[-1]
-            print('top3:', top3_indices)
-            
-            print("Caption with highest sim", captions[argmax_][0])
-            best_candidates.append(captions[argmax_][0])
-            best_parameters.append(captions[argmax_][1])
 
-            # #print(sims[argmax_])
-            # del sims[argmax_]
-            # del captions[argmax_]
-            # argmax_ = np.argmax(np.asarray(sims))
-            # #print("Caption with 2nd highest sim")
-            # #print (captions[argmax_][0])
-            # best_cannidates.append(captions[argmax_][0])
-            # #print(sims[argmax_])
-            # del sims[argmax_]
-            # del captions[argmax_]
-            # argmax_ = np.argmax(np.asarray(sims))
-            # #print("Caption with 3nd highest sim")
-            # #print (captions[argmax_][0])
-            # best_cannidates.append(captions[argmax_][0])
-            # del sims[argmax_]
-            # del captions[argmax_]
-            # argmax_ = np.argmax(np.asarray(sims))
-            # #print("Caption with 3nd highest sim")
-            # #print (captions[argmax_][0])
-            # best_cannidates.append(captions[argmax_][0])
-            # #print(sims[argmax_])
-
-            # sims= clip_rank(raw_image, best_cannidates, clip_model="RN50x64")
-            
-            # argmax_ = np.argmax(np.asarray(sims))
-            # print("BEST CAPTION AFTER RANKING WITH CLIP ViT L 14 & RESNET50x64:")
-            # print (best_cannidates[argmax_])
-
-        print('best_parameters', best_parameters)
+    print('best_parameters', best_parameters)
 
         
 if __name__ == '__main__':
