@@ -1,3 +1,4 @@
+import math
 import time
 from typing import Optional
 from PIL import Image
@@ -8,12 +9,14 @@ from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 import clip
 from models.blip import blip_decoder
+from models.blip_itm import blip_itm
 import glob
 
 
-def cos_sim(a, b):
-    a = a / torch.norm(a, dim=-1, keepdim=True)
-    b = b / torch.norm(b, dim=-1, keepdim=True)
+def cos_sim(a, b, normalize=True):
+    if normalize:
+        a = a / torch.norm(a, dim=-1, keepdim=True)
+        b = b / torch.norm(b, dim=-1, keepdim=True)
     return a @ b.T
 
 
@@ -30,6 +33,31 @@ def clip_rank(device, clip_model, preprocess, image_pil, text_list):
         text_features = clip_model.encode_text(text_tokens)
         s = cos_sim(text_features, image_features).item()
         similarities.append(s)
+
+    return similarities
+
+
+@torch.no_grad()
+def blip_rank(device, model_blip, image_pil, text_list, image_size=384, mode="itm"):
+    similarities= []
+
+    transform = transforms.Compose([
+        transforms.Resize((image_size,image_size),interpolation=InterpolationMode.BICUBIC),
+        transforms.ToTensor(),
+        transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+    ]) 
+    image = transform(image_pil).unsqueeze(0).to(device)   
+
+    for caption in text_list:
+        if mode == "itm":
+            itm_output = model_blip(image, caption, match_head='itm')
+            itm_score = F.softmax(itm_output, dim=1)[:,1]
+            similarities.append(itm_score.item())
+        elif mode == 'itc':
+            itc_score = model_blip(image, caption, match_head='itc')
+            similarities.append(itc_score.item())
+        else:
+            raise RuntimeError(f'blip ranking mode "{mode}" not supported')
 
     return similarities
 
@@ -107,12 +135,16 @@ def generate(
     min_length,
     max_length,
     repetition_penalty: Optional[float] = None,
-    min_alternate_prob=0
+    min_alternate_prob=0,
+    force_eos_log_prob=math.log(0.9)
 ):
     # run until max or no candidates remaining
     total_max_length = max_length.max()
 
     results = []
+
+    eos_probs = torch.empty(inputs.size(0), 0, device=inputs.device)
+    rel_entropies = torch.zeros(inputs.size(0), 0, device=inputs.device)
 
     for i in range(total_max_length):
         if inputs.size(0) == 0:
@@ -129,6 +161,7 @@ def generate(
         logits = outputs['logits']      # [1, 4, 30524]
 
         last_token_logits = logits[:,-1,:]
+        raw_p = F.softmax(last_token_logits, dim=-1)
         min_indices = torch.nonzero(i < min_length).view(-1)
         last_token_logits[min_indices, eos_token_id] = float('-inf')
 
@@ -136,14 +169,30 @@ def generate(
             repetition_penalty_apply(last_token_logits, tokens=inputs, penalty=repetition_penalty)
 
         last_token_logits = top_k_top_p_filtering_batch(last_token_logits, top_p=top_p, top_k=top_k)
-        
         p = F.softmax(last_token_logits, dim=-1)
+
+        # 1. record probabilities of EOS token
+        eos_prob = raw_p[:, eos_token_id].log()
+        
+        # 2. flatness of token probability distribution, e.g. D_KL between token probabilities and uniform distribution
+        num_tokens = p.shape[-1]
+        d_kl = torch.sum(raw_p * torch.log(1e-10 + raw_p * num_tokens), dim=-1)
+   
         next_token_samples = torch.multinomial(p, 2, replacement=False) # [40, 2]
 
         next_token = next_token_samples[:, :1]
         completed = torch.logical_or(next_token.squeeze(-1) == eos_token_id, max_length <= i)
+        
+        stop_at_high_eos = True
+        if stop_at_high_eos:
+            completed = torch.logical_or(completed, eos_prob > force_eos_log_prob)
+        else:
+            hi_eos = torch.logical_and(torch.logical_not(completed), eos_prob > force_eos_log_prob)
+            if torch.any(hi_eos):
+                results.append([inputs[hi_eos], min_length[hi_eos], max_length[hi_eos], top_p[hi_eos], eos_probs[hi_eos], rel_entropies[hi_eos]])
+
         if torch.any(completed):
-            results.append([inputs[completed], min_length[completed], max_length[completed], top_p[completed]])
+            results.append([inputs[completed], min_length[completed], max_length[completed], top_p[completed], eos_probs[completed], rel_entropies[completed]])
 
             # check possible replacements            
             if min_alternate_prob > 0:
@@ -159,6 +208,10 @@ def generate(
 
             not_completed = torch.logical_not(completed)
             inputs = inputs[not_completed]
+            eos_prob = eos_prob[not_completed]
+            d_kl = d_kl[not_completed]
+            eos_probs = eos_probs[not_completed]
+            rel_entropies = rel_entropies[not_completed]
             next_token = next_token[not_completed]
             if type(top_p) == torch.Tensor:
                 top_p = top_p[not_completed]
@@ -169,16 +222,20 @@ def generate(
             encoder_hidden_states = encoder_hidden_states[not_completed]
             encoder_attention_mask = encoder_attention_mask[not_completed]
 
+        #print('eos_probs', eos_probs.shape, eos_prob.shape)
+        #print('rel_entropies', rel_entropies.shape, d_kl.shape)
         inputs = torch.cat([inputs, next_token], dim=-1)
+        eos_probs = torch.cat([eos_probs, eos_prob.unsqueeze(-1)], dim=-1)
+        rel_entropies = torch.cat([rel_entropies, d_kl.unsqueeze(-1)], dim=-1) 
 
     if inputs.size(0) > 0:
-        results.append([inputs, min_length, max_length, top_p])
+        results.append([inputs, min_length, max_length, top_p, eos_probs, rel_entropies])
 
     return results
 
 
 @torch.no_grad()
-def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_len=0, repetition_penalty=1.4, prompt='a picture of ', unique=True):
+def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_len=0, repetition_penalty=1.3, prompt='a picture of ', unique=True):
     batch_size = image.size(0)
     device = image.device
     image_embeds = blip_model.visual_encoder(image)
@@ -194,6 +251,7 @@ def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_l
     input_ids[:,0] = bos_token_id   # replace begin token 
     input_ids = input_ids[:, :-1]   # remove end token
     input_ids = input_ids.repeat_interleave(sample_count, dim=0)
+    num_prompt_tokens = input_ids.size(1)
 
     outputs = generate(blip_model.text_decoder, input_ids, image_embeds, image_atts, 
         eos_token_id=eos_token_id,
@@ -205,18 +263,21 @@ def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_l
 
     captions = []
     parameters = []
+    stats = []
     for output in outputs:
         for i,o in enumerate(output[0]):
             caption = blip_model.tokenizer.decode(o, skip_special_tokens=True)
+            tokens = blip_model.tokenizer.convert_ids_to_tokens(o)
             caption_without_prompt = caption[len(prompt):]
             if unique and caption_without_prompt not in captions:
                 captions.append(caption[len(prompt):])  # remove prompt
                 parameters.append([output[1][i].item(), output[2][i].item(), output[3][i].item()])
-    return captions, parameters
+                stats.append({ 'eos_prob': output[4][i], 'rel_entropy': output[5][i], 'tokens': tokens[num_prompt_tokens:]})
+    return captions, parameters, stats
 
 
 def main():
-    torch.hub.set_dir('/mnt/sdb3/torch_hub')
+    torch.hub.set_dir('/data/torch_hub')
 
     device = torch.device('cuda', 1)
     device0 = torch.device('cuda', 0)
@@ -235,6 +296,11 @@ def main():
     model.eval()
     model = model.to(device)
 
+    # blip_itm_model_url = 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_large_retrieval_coco.pth'
+    # model_blip_itm = blip_itm(pretrained=blip_itm_model_url, image_size=image_size, vit='large', med_config='BLIP/configs/med_config.json')
+    # model_blip_itm.eval()
+    # model_blip_itm.to(device)
+
     clip_model_name1 = "ViT-L/14"
     clip_model1, clip_preprocess1 = clip.load(clip_model_name1, device=device)
 
@@ -243,9 +309,19 @@ def main():
    
     best_parameters = []
 
+    print('<!DOCTYPE html>')
+    print('<html><head><style>img { max-width: 512px; max-height: 512px; width: auto; height: auto; }</style></head><body><ul>')
+      
     files = glob.glob("./images/image-photo/*.jpg")
+    #files = glob.glob("./images/people1/*.jpg")
+    count = 0
     for f in files:
-        print(f'Image file: ', f)
+        count += 1
+        if count > 100:
+            break
+
+        
+        #print(f'Image file: ', f)
         raw_image = Image.open(f).convert('RGB')   
         w,h = raw_image.size
 
@@ -253,6 +329,7 @@ def main():
     
         #top_k = 5000
         top_k = 2500
+        #top_k = 500
         #top_p = 0.3
         
         top_p = torch.tensor(([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]*5), device=device)
@@ -271,36 +348,62 @@ def main():
         # print('max_len', max_len)
 
         start = time.time()
-        captions,p = sample(image, model, sample_count=min_len.size(0), top_p=top_p, top_k=top_k, min_len=min_len, max_len=max_len, prompt='a picture of ')
-        duration = time.time() - start
+        captions,p,stats = sample(image, model, sample_count=min_len.size(0), top_p=top_p, top_k=top_k, min_len=min_len, max_len=max_len, prompt='a picture of ')
         
-        # print all candidates
-        # for i,c in enumerate(captions):
-        #     print(i, c)
+        #longest_caption = max(captions, key=lambda x: len(x))
+        #print(f'longest caption (of {len(captions)}): {longest_caption}')
+
+        duration = time.time() - start
 
         #print(f'took: {duration:.2f}s')
 
         sims = clip_rank(device, clip_model1, clip_preprocess1, raw_image, captions)
+        #sims = blip_rank(device, model_blip_itm, raw_image, captions, mode='itm')
+
+        # print all candidates
+        show_candidates = False
+        if show_candidates:
+            for i,c in enumerate(captions):
+                print(f'{i:03d} [{sims[i]}:.4f]: {c}')
+
         #print('sims:', sims)
         top_indices = np.argsort(np.asarray(sims))[-5:][::-1]
-        argmax_ = top_indices[-1]
         best_captions = [captions[i] for i in top_indices]
         best_params = [p[i] for i in top_indices]
+        best_stats = [stats[i] for i in top_indices]
 
-        print(f'Stage 1 ({clip_model_name1}):')
+        print('<li>')
+        print(f'<img src="{f}" /><br />')
+
+        print(f'<p>Stage 1 ({clip_model_name1}):</p>')
+        print('<ul>')
         for i in range(len(best_captions)):
-            print(f'{i} [{sims[top_indices[i]]:.3f}]: {best_captions[-i-1]}')
+            print(f'<li>{i:02d} [{sims[top_indices[i]]:.3f}]: {best_captions[i]}</li>')
+        
+            
+            # bs = best_stats[i]
+            # eos_prob = bs['eos_prob']
+            # rel_entropy = bs['rel_entropy']
+            # for i,token in enumerate(bs['tokens']):
+            #     print(f'{i}: (eos: {eos_prob[i]:.4f}; rel_entropy: {rel_entropy[i]:.4f}) {token}')
+
+            # print('eos_prob: ', best_stats[i]['eos_prob'])
+            # print('rel_entropy', best_stats[i]['rel_entropy'])
+            # print('tokens', best_stats[i]['tokens'])
+        print('</ul>')
 
         sims2 = clip_rank(device0, clip_model2, clip_preprocess2, raw_image, best_captions)
         top_indices2 = np.argsort(np.asarray(sims2))[-3:][::-1]
         best_index = np.argmax(np.asarray(sims2))
         
         best_captions2 = [best_captions[i] for i in top_indices2]
-        print(f'Stage 2 ({clip_model_name2}):')
+        print(f'<p>Stage 2 ({clip_model_name2}):</p>')
+        print('<ul>')
         for i in range(len(best_captions2)):
-            print(f'{i} [{sims2[top_indices2[i]]:.3f}]: {best_captions2[-i-1]}')
+            print(f'<li>{i:02d} [{sims2[top_indices2[i]]:.3f}]: {best_captions2[-i-1]}</li>')
+        print('</ul>')
 
-        print()
+        print('</li>')
         #print('top1:', best_index)
         #print(best_captions[best_index])
         #best_parameters.append(best_params[best_index])
@@ -350,9 +453,9 @@ def main():
                     print('caption:', caption)
                     #def generate(self, image, sample=False, num_beams=3, max_length=30, min_length=10, top_p=0.9, repetition_penalty=1.0)
                     captions.append((caption, {'sample': False, 'num_beams': beam_n, 'max_length': 45, 'min_length': 30, 'top_p': 0.9}))
+    print('</ul></body></html>')
 
-
-    print('best_parameters', best_parameters)
+    #print('best_parameters', best_parameters)
 
         
 if __name__ == '__main__':
