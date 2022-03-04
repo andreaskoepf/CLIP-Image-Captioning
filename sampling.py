@@ -144,7 +144,7 @@ def generate(
     results = []
 
     eos_probs = torch.empty(inputs.size(0), 0, device=inputs.device)
-    rel_entropies = torch.zeros(inputs.size(0), 0, device=inputs.device)
+    #rel_entropies = torch.zeros(inputs.size(0), 0, device=inputs.device)
 
     for i in range(total_max_length):
         if inputs.size(0) == 0:
@@ -176,7 +176,7 @@ def generate(
         
         # 2. flatness of token probability distribution, e.g. D_KL between token probabilities and uniform distribution
         num_tokens = p.shape[-1]
-        d_kl = torch.sum(raw_p * torch.log(1e-10 + raw_p * num_tokens), dim=-1)
+        #d_kl = torch.sum(raw_p * torch.log(1e-10 + raw_p * num_tokens), dim=-1)
    
         next_token_samples = torch.multinomial(p, 2, replacement=False) # [40, 2]
 
@@ -184,15 +184,16 @@ def generate(
         completed = torch.logical_or(next_token.squeeze(-1) == eos_token_id, max_length <= i)
         
         stop_at_high_eos = True
-        if stop_at_high_eos:
-            completed = torch.logical_or(completed, eos_prob > force_eos_log_prob)
-        else:
-            hi_eos = torch.logical_and(torch.logical_not(completed), eos_prob > force_eos_log_prob)
-            if torch.any(hi_eos):
-                results.append([inputs[hi_eos], min_length[hi_eos], max_length[hi_eos], top_p[hi_eos], eos_probs[hi_eos], rel_entropies[hi_eos]])
+        if force_eos_log_prob < 0:
+            if stop_at_high_eos:
+                completed = torch.logical_or(completed, eos_prob > force_eos_log_prob)
+            else:
+                hi_eos = torch.logical_and(torch.logical_not(completed), eos_prob > force_eos_log_prob)
+                if torch.any(hi_eos):
+                    results.append([inputs[hi_eos], min_length[hi_eos], max_length[hi_eos], top_p[hi_eos], eos_probs[hi_eos]]) #, rel_entropies[hi_eos]])
 
         if torch.any(completed):
-            results.append([inputs[completed], min_length[completed], max_length[completed], top_p[completed], eos_probs[completed], rel_entropies[completed]])
+            results.append([inputs[completed], min_length[completed], max_length[completed], top_p[completed], eos_probs[completed]]) #, rel_entropies[completed]])
 
             # check possible replacements            
             if min_alternate_prob > 0:
@@ -209,9 +210,9 @@ def generate(
             not_completed = torch.logical_not(completed)
             inputs = inputs[not_completed]
             eos_prob = eos_prob[not_completed]
-            d_kl = d_kl[not_completed]
+            #d_kl = d_kl[not_completed]
             eos_probs = eos_probs[not_completed]
-            rel_entropies = rel_entropies[not_completed]
+            #rel_entropies = rel_entropies[not_completed]
             next_token = next_token[not_completed]
             if type(top_p) == torch.Tensor:
                 top_p = top_p[not_completed]
@@ -226,16 +227,16 @@ def generate(
         #print('rel_entropies', rel_entropies.shape, d_kl.shape)
         inputs = torch.cat([inputs, next_token], dim=-1)
         eos_probs = torch.cat([eos_probs, eos_prob.unsqueeze(-1)], dim=-1)
-        rel_entropies = torch.cat([rel_entropies, d_kl.unsqueeze(-1)], dim=-1) 
+        #rel_entropies = torch.cat([rel_entropies, d_kl.unsqueeze(-1)], dim=-1) 
 
     if inputs.size(0) > 0:
-        results.append([inputs, min_length, max_length, top_p, eos_probs, rel_entropies])
+        results.append([inputs, min_length, max_length, top_p, eos_probs]) #, rel_entropies])
 
     return results
 
 
 @torch.no_grad()
-def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_len=0, repetition_penalty=1.3, prompt='a picture of ', unique=True):
+def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_len=0, repetition_penalty=1.3, force_eos_log_prob=math.log(0.9), prompt='a picture of ', unique=True, num_runs=1):
     batch_size = image.size(0)
     device = image.device
     image_embeds = blip_model.visual_encoder(image)
@@ -253,13 +254,16 @@ def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_l
     input_ids = input_ids.repeat_interleave(sample_count, dim=0)
     num_prompt_tokens = input_ids.size(1)
 
-    outputs = generate(blip_model.text_decoder, input_ids, image_embeds, image_atts, 
-        eos_token_id=eos_token_id,
-        top_p=top_p,
-        top_k=top_k,
-        min_length=min_len,
-        max_length=max_len,
-        repetition_penalty=repetition_penalty)
+    outputs = []
+    for i in range(num_runs):
+        outputs = outputs + generate(blip_model.text_decoder, input_ids, image_embeds, image_atts, 
+            eos_token_id=eos_token_id,
+            top_p=top_p,
+            top_k=top_k,
+            min_length=min_len,
+            max_length=max_len,
+            repetition_penalty=repetition_penalty,
+            force_eos_log_prob=force_eos_log_prob)
 
     captions = []
     parameters = []
@@ -272,12 +276,14 @@ def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_l
             if unique and caption_without_prompt not in captions:
                 captions.append(caption[len(prompt):])  # remove prompt
                 parameters.append([output[1][i].item(), output[2][i].item(), output[3][i].item()])
-                stats.append({ 'eos_prob': output[4][i], 'rel_entropy': output[5][i], 'tokens': tokens[num_prompt_tokens:]})
+                #stats.append({ 'eos_prob': output[4][i], 'rel_entropy': output[5][i], 'tokens': tokens[num_prompt_tokens:]})
+                stats.append({ 'eos_prob': output[4][i], 'tokens': tokens[num_prompt_tokens:]})
     return captions, parameters, stats
 
 
 def main():
-    torch.hub.set_dir('/data/torch_hub')
+    #torch.hub.set_dir('/data/torch_hub')
+    torch.hub.set_dir('/mnt/sdb3/torch_hub')
 
     device = torch.device('cuda', 1)
     device0 = torch.device('cuda', 0)
@@ -348,7 +354,17 @@ def main():
         # print('max_len', max_len)
 
         start = time.time()
-        captions,p,stats = sample(image, model, sample_count=min_len.size(0), top_p=top_p, top_k=top_k, min_len=min_len, max_len=max_len, prompt='a picture of ')
+        captions,p,stats = sample(
+            image,
+            model,
+            sample_count=min_len.size(0),
+            top_p=top_p,
+            top_k=top_k,
+            min_len=min_len,
+            max_len=max_len,
+            force_eos_log_prob=0, # math.log(0.9)
+            prompt='a picture of ',
+            num_runs=10)
         
         #longest_caption = max(captions, key=lambda x: len(x))
         #print(f'longest caption (of {len(captions)}): {longest_caption}')
@@ -375,12 +391,11 @@ def main():
         print('<li>')
         print(f'<img src="{f}" /><br />')
 
-        print(f'<p>Stage 1 ({clip_model_name1}):</p>')
+        print(f'<p>Stage 1 ({clip_model_name1}) (top 5 of {len(captions)} distinct candidates):</p>')
         print('<ul>')
         for i in range(len(best_captions)):
             print(f'<li>{i:02d} [{sims[top_indices[i]]:.3f}]: {best_captions[i]}</li>')
         
-            
             # bs = best_stats[i]
             # eos_prob = bs['eos_prob']
             # rel_entropy = bs['rel_entropy']
