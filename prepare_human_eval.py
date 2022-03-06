@@ -12,7 +12,7 @@ import torch
 from create_dataset import CocoJsonDataset
 from sampling import clip_rank, load_blip_decoder,sample
 import clip
-import tqdm
+from tqdm import tqdm
 
 
 def parse_args():
