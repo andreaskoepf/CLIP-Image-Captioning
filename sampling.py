@@ -281,14 +281,8 @@ def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_l
     return captions, parameters, stats
 
 
-def main():
-    #torch.hub.set_dir('/data/torch_hub')
-    torch.hub.set_dir('/mnt/sdb3/torch_hub')
 
-    device = torch.device('cuda', 1)
-    device0 = torch.device('cuda', 0)
-
-    image_size = 384
+def load_blip_decoder(device, image_size = 384):
     transform = transforms.Compose([
         transforms.Resize((image_size,image_size),interpolation=InterpolationMode.BICUBIC),
         transforms.ToTensor(),
@@ -301,6 +295,17 @@ def main():
     model = blip_decoder(pretrained=model_url, image_size=384, vit='large', med_config='BLIP/configs/med_config.json')
     model.eval()
     model = model.to(device)
+    return model, transform
+
+
+def main():
+    #torch.hub.set_dir('/data/torch_hub')
+    torch.hub.set_dir('/mnt/sdb3/torch_hub')
+
+    device = torch.device('cuda', 1)
+    device0 = torch.device('cuda', 0)
+
+    model,transform = load_blip_decoder(device)
 
     # blip_itm_model_url = 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_large_retrieval_coco.pth'
     # model_blip_itm = blip_itm(pretrained=blip_itm_model_url, image_size=image_size, vit='large', med_config='BLIP/configs/med_config.json')
@@ -318,8 +323,8 @@ def main():
     print('<!DOCTYPE html>')
     print('<html><head><style>img { max-width: 512px; max-height: 512px; width: auto; height: auto; }</style></head><body><ul>')
       
-    files = glob.glob("./images/image-photo/*.jpg")
-    #files = glob.glob("./images/people1/*.jpg")
+    #files = glob.glob("./images/image-photo/*.jpg")
+    files = glob.glob("./images/people1/*.jpg")
     count = 0
     for f in files:
         count += 1
@@ -362,7 +367,7 @@ def main():
             top_k=top_k,
             min_len=min_len,
             max_len=max_len,
-            force_eos_log_prob=0, # math.log(0.9)
+            force_eos_log_prob=math.log(0.9),
             prompt='a picture of ',
             num_runs=10)
         
