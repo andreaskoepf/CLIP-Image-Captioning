@@ -49,7 +49,7 @@ def blip_rank(device, model_blip, image_pil, text_list, image_size=384, mode="it
     image = transform(image_pil).unsqueeze(0).to(device)   
 
     for caption in text_list:
-        if mode == "itm":
+        if mode == 'itm':
             itm_output = model_blip(image, caption, match_head='itm')
             itm_score = F.softmax(itm_output, dim=1)[:,1]
             similarities.append(itm_score.item())
@@ -282,7 +282,7 @@ def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_l
 
 
 
-def load_blip_decoder(device, image_size = 384):
+def load_blip_decoder(device, image_size=384):
     transform = transforms.Compose([
         transforms.Resize((image_size,image_size),interpolation=InterpolationMode.BICUBIC),
         transforms.ToTensor(),
@@ -298,6 +298,14 @@ def load_blip_decoder(device, image_size = 384):
     return model, transform
 
 
+def load_blip_ranking_model(device, image_size=384):
+    blip_model_url = 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_large_retrieval_coco.pth'
+    blip_model = blip_itm(pretrained=blip_model_url, image_size=image_size, vit='large', med_config='BLIP/configs/med_config.json')
+    blip_model.eval()
+    blip_model.to(device)
+    return blip_model
+
+
 def main():
     #torch.hub.set_dir('/data/torch_hub')
     torch.hub.set_dir('/mnt/sdb3/torch_hub')
@@ -306,11 +314,6 @@ def main():
     device0 = torch.device('cuda', 0)
 
     model,transform = load_blip_decoder(device)
-
-    # blip_itm_model_url = 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_large_retrieval_coco.pth'
-    # model_blip_itm = blip_itm(pretrained=blip_itm_model_url, image_size=image_size, vit='large', med_config='BLIP/configs/med_config.json')
-    # model_blip_itm.eval()
-    # model_blip_itm.to(device)
 
     clip_model_name1 = "ViT-L/14"
     clip_model1, clip_preprocess1 = clip.load(clip_model_name1, device=device)

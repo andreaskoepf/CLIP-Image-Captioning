@@ -10,7 +10,7 @@ from PIL import Image
 import numpy as np
 import torch
 from create_dataset import CocoJsonDataset
-from sampling import clip_rank, load_blip_decoder,sample
+from sampling import clip_rank, load_blip_decoder, sample, blip_rank, load_blip_ranking_model
 import clip
 from tqdm import tqdm
 
@@ -31,6 +31,13 @@ def parse_args():
 
     parser.add_argument('--mode', default='CLIP-ViT-L+RN50x64', type=str)   # CLIP-ViT-L+RN50x64, CLIP-ViT-L, CLIP-RN50x64
 
+    parser.add_argument('--deviceA_index', default=0, type=int)
+    parser.add_argument('--deviceB_index', default=1, type=int)
+
+    parser.add_argument('--set_max_len', default=None, type=int)
+    parser.add_argument('--set_min_len', default=None, type=int)
+    parser.add_argument('--set_top_p', default=None, type=float)
+
     opt = parser.parse_args()
     return opt
 
@@ -45,8 +52,8 @@ def main():
 
     torch.hub.set_dir('/mnt/sdb3/torch_hub')
 
-    device0 = torch.device('cuda', 0)
-    device1 = torch.device('cuda', 1)
+    device0 = torch.device('cuda', args.deviceA_index)
+    device1 = torch.device('cuda', args.deviceB_index)
 
     model,transform = load_blip_decoder(device1)
 
@@ -54,10 +61,9 @@ def main():
 
     if mode == 'CLIP-ViT-L+RN50x64':
         clip_model_name1 = "ViT-L/14"
+        clip_model_name2 = "RN50x64"
         print('loading CLIP: ', clip_model_name1)
         clip_model1, clip_preprocess1 = clip.load(clip_model_name1, device=device1)
-
-        clip_model_name2 = "RN50x64"
         print('loading CLIP: ', clip_model_name2)
         clip_model2, clip_preprocess2 = clip.load(clip_model_name2, device=device0)
     elif mode == 'CLIP-ViT-L':
@@ -68,6 +74,8 @@ def main():
         clip_model_name1 = "RN50x64"
         print('loading CLIP: ', clip_model_name1)
         clip_model1, clip_preprocess1 = clip.load(clip_model_name1, device=device1)
+    elif mode == 'ITC' or mode == 'ITM':
+        blip_ranking_model = load_blip_ranking_model(device0)
     else:
         raise RuntimeError(f'Unsupported mode "{mode}"')
 
@@ -120,11 +128,20 @@ def main():
 
         image = transform(raw_image).unsqueeze(0).to(device1)
             
-        top_p = torch.tensor(([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]*5), device=device1)
-        #top_p = torch.tensor([0.3]*40, device=device)
-        min_len = torch.tensor(([5]*8 + [10]*8 + [15]*8 + [20]*8 + [30]*8), device=device1)
-        max_len = torch.tensor(([20]*8 + [30]*8 + [30]*8 + [45]*8 + [45]*8), device=device1)
-        #max_len = torch.tensor(([45]*40), device=device)
+        if args.set_top_p is not None:
+            top_p = torch.tensor([args.set_top_p]*40, device=device1)
+        else:
+            top_p = torch.tensor(([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]*5), device=device1)
+        
+        if args.set_min_len is not None:
+            min_len = torch.tensor(([args.set_min_len]*40), device=device1)
+        else:
+            min_len = torch.tensor(([5]*8 + [10]*8 + [15]*8 + [20]*8 + [30]*8), device=device1)
+        
+        if args.set_max_len is not None:
+            max_len = torch.tensor(([args.set_max_len]*40), device=device1)
+        else:
+            max_len = torch.tensor(([20]*8 + [30]*8 + [30]*8 + [45]*8 + [45]*8), device=device1)
 
         captions,_,_ = sample(
             image,
@@ -142,13 +159,15 @@ def main():
             sims = clip_rank(device1, clip_model1, clip_preprocess1, raw_image, captions)
             top_indices = np.argsort(np.asarray(sims))[-5:][::-1]
             best_captions = [captions[i] for i in top_indices]
-
             sims2 = clip_rank(device0, clip_model2, clip_preprocess2, raw_image, best_captions)
             best_index = np.argmax(np.asarray(sims2))
             synth_caption = best_captions[best_index]
-
         elif mode == 'CLIP-ViT-L' or mode == 'CLIP-RN50x64':
             sims = clip_rank(device1, clip_model1, clip_preprocess1, raw_image, captions)
+            best_index = np.argmax(np.asarray(sims))
+            synth_caption = captions[best_index]
+        elif mode == 'ITC' or mode == 'ITM':
+            sims = blip_rank(device0, blip_ranking_model, raw_image, captions, mode=mode.lower())
             best_index = np.argmax(np.asarray(sims))
             synth_caption = captions[best_index]
 
