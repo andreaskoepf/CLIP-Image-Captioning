@@ -158,19 +158,19 @@ def main():
         print('Candidates: ', len(captions))
         sims = clip_rank(device1, clip_model1, clip_preprocess1, raw_image, captions)
         captions = [c for i,c in enumerate(captions) if sims[i] > CLIP_L_sim_threshold]
-        print(f'after CLIP L filtering: {len(captions)} (CLIP_L_sim_threshold={CLIP_L_sim_threshold})')
+        print(f'after CLIP L > {CLIP_L_sim_threshold} filtering: {len(captions)}')
 
         sims = clip_rank(device0, clip_model2, clip_preprocess2, raw_image, captions)
         captions = [c for i,c in enumerate(captions) if sims[i] > CLIP_RN50x64_threshold]
-        print(f'after RN filtering: {len(captions)} (CLIP_RN50x64_threshold={CLIP_RN50x64_threshold})')
+        print(f'after RN > {CLIP_RN50x64_threshold} filtering: {len(captions)}')
 
         sims = blip_rank(device0, blip_ranking_model, raw_image, captions, mode='itm')
         captions = [c for i,c in enumerate(captions) if sims[i] > ITM_threshold]
-        print(f'after ITM filtering: {len(captions)} (ITM_threshold={ITM_threshold})')
+        print(f'after ITM > {ITM_threshold} filtering: {len(captions)}')
 
         sims = blip_rank(device0, blip_ranking_model, raw_image, captions, mode='itc')
         captions = [c for i,c in enumerate(captions) if sims[i] > ITC_threshold]
-        print(f'after ITC filtering: {len(captions)} (ITC_threshold={ITC_threshold})')
+        print(f'after ITC > {ITC_threshold} filtering: {len(captions)}')
 
         print('synth: ', captions)
         print('human: ', caption)
