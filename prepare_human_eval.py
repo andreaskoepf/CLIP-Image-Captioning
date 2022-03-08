@@ -13,6 +13,7 @@ from create_dataset import CocoJsonDataset
 from sampling import clip_rank, load_blip_decoder, sample, blip_rank, load_blip_ranking_model
 import clip
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 
 def parse_args():
@@ -40,6 +41,15 @@ def parse_args():
 
     opt = parser.parse_args()
     return opt
+
+
+def plot_histogram(data, label, title, x_label, y_label='Frequency', bins=100):
+    plt.figure(figsize=(8,6))
+    plt.hist(data, alpha=1.0, label=label, bins=bins)
+    plt.xlabel(x_label, size=14)
+    plt.ylabel(y_label, size=14)
+    plt.title(title)
+    plt.legend(loc='upper right')
 
 
 def main():
@@ -108,6 +118,8 @@ def main():
     print('creating image directory: ', output_image_folder_path)
     output_image_folder_path.mkdir(exist_ok=False)
 
+    all_sims = []
+    winner_sims = []
 
     gt_captions = [val_annotations[x] for x in torch.randperm(len(val_annotations))[:n]]
     for i,x in enumerate(tqdm(gt_captions)):
@@ -118,7 +130,7 @@ def main():
 
         f = image_folder_path / x.image.file_name
 
-        new_fn = output_image_folder_path/ (uuid.uuid4().hex + '.jpg')
+        new_fn = output_image_folder_path / (uuid.uuid4().hex + '.jpg')
         shutil.copyfile(f, new_fn)
 
         rel_out_fn = new_fn.relative_to(output_folder_path)
@@ -161,15 +173,20 @@ def main():
             best_captions = [captions[i] for i in top_indices]
             sims2 = clip_rank(device0, clip_model2, clip_preprocess2, raw_image, best_captions)
             best_index = np.argmax(np.asarray(sims2))
+            winner_sims.append(sims2[best_index])
             synth_caption = best_captions[best_index]
         elif mode == 'CLIP-ViT-L' or mode == 'CLIP-RN50x64':
             sims = clip_rank(device1, clip_model1, clip_preprocess1, raw_image, captions)
             best_index = np.argmax(np.asarray(sims))
+            winner_sims.append(sims[best_index])
             synth_caption = captions[best_index]
         elif mode == 'ITC' or mode == 'ITM':
             sims = blip_rank(device0, blip_ranking_model, raw_image, captions, mode=mode.lower())
             best_index = np.argmax(np.asarray(sims))
+            winner_sims.append(sims[best_index])
             synth_caption = captions[best_index]
+
+        all_sims = all_sims + sims
 
         #print('synth: ', synth_caption)
         #print('human: ', caption)
@@ -185,6 +202,18 @@ def main():
                 'image_size': [w, h]
             }
         )
+
+    plot_histogram(all_sims, mode, title=f'All Scores Histogram {mode}', x_label=f'{mode} score')
+    fn = f'scores_{mode}_hist_all.'
+    fn = output_image_folder_path / fn
+    plt.savefig(fn + 'png')
+    plt.savefig(fn + 'svg')
+
+    plot_histogram(winner_sims, mode, title=f'Winner Score Histogram {mode}', x_label=f'{mode} score')
+    fn = f'score_{mode}_hist_winner.'
+    fn = output_image_folder_path / fn
+    plt.savefig(fn + 'png')
+    plt.savefig(fn + 'svg')
 
     json_data = {
         'args': vars(args),
