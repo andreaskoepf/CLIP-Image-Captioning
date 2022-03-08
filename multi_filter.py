@@ -170,15 +170,15 @@ def main():
         print(f'after CLIP L filtering: {len(captions)}')
 
         sims = clip_rank(device0, clip_model2, clip_preprocess2, raw_image, captions)
-        captions = [c for i,c in enumerate(captions) if sims[i] > CLIP_RN50x64_threshold]
+        captions = filter_captions(captions, sims, CLIP_RN50x64_threshold]
         print(f'after RN filtering: {len(captions)}')
 
         sims = blip_rank(device0, blip_ranking_model, raw_image, captions, mode='itm')
-        captions = [c for i,c in enumerate(captions) if sims[i] > ITM_threshold]
+        captions = filter_captions(captions, sims, ITM_threshold)
         print(f'after ITM filtering: {len(captions)}')
 
         sims = blip_rank(device0, blip_ranking_model, raw_image, captions, mode='itc')
-        captions = [c for i,c in enumerate(captions) if sims[i] > ITC_threshold]
+        captions = filter_captions(captions, sims, ITC_threshold)
         print(f'after ITC filtering: {len(captions)}')
 
         print('synth: ', captions)
