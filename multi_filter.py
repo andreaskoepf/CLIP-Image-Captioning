@@ -159,7 +159,7 @@ def main():
             results = [c for i,c in enumerate(captions) if sims[i] > threshold]
             if len(results) == 0:
                 sorted_indices = np.argsort(np.asarray(sims))[::-1]
-                num_select = max(1, int(len(results) * default_p))
+                num_select = max(1, int(len(captions) * default_p))
                 sorted_indices = sorted_indices[:num_select]
                 results = [captions[i] for i in sorted_indices]
             return results
@@ -170,7 +170,7 @@ def main():
         print(f'after CLIP L filtering: {len(captions)}')
 
         sims = clip_rank(device0, clip_model2, clip_preprocess2, raw_image, captions)
-        captions = filter_captions(captions, sims, CLIP_RN50x64_threshold]
+        captions = filter_captions(captions, sims, CLIP_RN50x64_threshold)
         print(f'after RN filtering: {len(captions)}')
 
         sims = blip_rank(device0, blip_ranking_model, raw_image, captions, mode='itm')
