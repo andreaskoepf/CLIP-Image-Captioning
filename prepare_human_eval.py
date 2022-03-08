@@ -205,15 +205,13 @@ def main():
 
     plot_histogram(all_sims, mode, title=f'All Scores Histogram {mode}', x_label=f'{mode} score')
     fn = f'scores_{mode}_hist_all.'
-    fn = output_image_folder_path / fn
-    plt.savefig(fn + 'png')
-    plt.savefig(fn + 'svg')
+    plt.savefig(output_image_folder_path / (fn + 'png'))
+    plt.savefig(output_image_folder_path / (fn + 'svg'))
 
     plot_histogram(winner_sims, mode, title=f'Winner Score Histogram {mode}', x_label=f'{mode} score')
     fn = f'score_{mode}_hist_winner.'
-    fn = output_image_folder_path / fn
-    plt.savefig(fn + 'png')
-    plt.savefig(fn + 'svg')
+    plt.savefig(output_image_folder_path / (fn + 'png'))
+    plt.savefig(output_image_folder_path / (fn + 'svg'))
 
     json_data = {
         'args': vars(args),
