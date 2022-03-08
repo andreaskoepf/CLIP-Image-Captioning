@@ -219,7 +219,7 @@ def main():
             captions = entry['synth_captions']
             print(f'<li><p><img src="{fn}" alt="{caption}" /><br />', file=f)
             print('<ul>',file=f)
-            for c in captions:
+            for c in captions[:25]:
                 print(f'<li>{c}</li>', file=f)
             print(f'</ul>Ground truth: {gt}</p>', file=f)
         print('</ul></body></html>', file=f)
