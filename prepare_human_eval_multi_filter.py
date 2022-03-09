@@ -236,7 +236,7 @@ def main():
         w = csv.writer(f, dialect='excel')
         w.writerow(['id', 'file_name', 'human', 'human_caption', 'synth_caption', 'synth_candidates', 'original_file_name'])
         for i,entry in enumerate(priv):
-            w.writerow([entry['id'], entry['file_name'], gt[i].item(), entry['human_caption'], entry['synth_caption'], entry['synth_candidates'], entry['original_file_name']])
+            w.writerow([entry['id'], entry['file_name'], gt[i].item(), entry['ground_truth'], entry['synth_caption'], entry['synth_candidates'], entry['original_file_name']])
 
 
 if __name__ == '__main__':
