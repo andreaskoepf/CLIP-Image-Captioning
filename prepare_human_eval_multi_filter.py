@@ -184,20 +184,20 @@ def main():
         captions3, scores3 = filter_captions(captions2, sims, ITC_threshold)
         print(f'after ITC filtering: {len(captions3)}')
 
-        captions = captions3
-        print('synth: ', captions)
-        print('human: ', caption)
-
         priv.append(
             {
                 'id': args.id_prefix + f'{i:04d}',
                 'file_name': str(rel_out_fn),
                 'original_file_name': str(f),
                 'ground_truth': caption,
-                'synth_caption': captions[0],
+                'synth_caption': captions3[0],
+                'synth_candidates': len(captions),
                 'image_size': [w, h]
             }
         )
+
+        print('synth: ', captions3)
+        print('human: ', caption)
 
     json_data = {
         'args': vars(args),
