@@ -102,7 +102,6 @@ def main():
     print('creating image directory: ', output_image_folder_path)
     output_image_folder_path.mkdir(exist_ok=False)
 
-
     n = args.n
     gt_captions = [val_annotations[x] for x in torch.randperm(len(val_annotations))[:n]]
     for i,x in enumerate(tqdm(gt_captions)):
@@ -188,7 +187,7 @@ def main():
         itc_scores = scores3
         clipl_scores = [scores0[captions0.index(c)] for c in captions3]
 
-        captions = captions2
+        captions = captions3
         print('synth: ', captions)
         print('human: ', caption)
 
