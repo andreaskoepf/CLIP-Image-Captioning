@@ -161,26 +161,34 @@ def main():
                 sorted_indices = np.argsort(np.asarray(sims))[::-1]
                 num_select = max(1, int(len(captions) * default_p))
                 sorted_indices = sorted_indices[:num_select]
-                results = [captions[i] for i in sorted_indices]
-            return results
+            else:
+                sims = [s for s in sims if s > threshold]
+                sorted_indices = np.argsort(np.asarray(sims))[::-1]
+            results = [captions[i] for i in sorted_indices]
+            scores = [sims[i] for i in sorted_indices]
+            return results, scores
 
         print('Candidates: ', len(captions))
         sims = clip_rank(device1, clip_model1, clip_preprocess1, raw_image, captions)
-        captions = filter_captions(captions, sims, CLIP_L_sim_threshold)
-        print(f'after CLIP L filtering: {len(captions)}')
+        captions0, scores0 = filter_captions(captions, sims, CLIP_L_sim_threshold)
+        print(f'after CLIP L filtering: {len(captions0)}')
 
-        sims = clip_rank(device0, clip_model2, clip_preprocess2, raw_image, captions)
-        captions = filter_captions(captions, sims, CLIP_RN50x64_threshold)
-        print(f'after RN filtering: {len(captions)}')
+        sims = clip_rank(device0, clip_model2, clip_preprocess2, raw_image, captions0)
+        captions1, scores1 = filter_captions(captions0, sims, CLIP_RN50x64_threshold)
+        print(f'after RN filtering: {len(captions1)}')
 
-        sims = blip_rank(device0, blip_ranking_model, raw_image, captions, mode='itm')
-        captions = filter_captions(captions, sims, ITM_threshold)
-        print(f'after ITM filtering: {len(captions)}')
+        sims = blip_rank(device0, blip_ranking_model, raw_image, captions1, mode='itm')
+        captions2, scores2 = filter_captions(captions1, sims, ITM_threshold)
+        print(f'after ITM filtering: {len(captions2)}')
 
-        sims = blip_rank(device0, blip_ranking_model, raw_image, captions, mode='itc')
-        captions = filter_captions(captions, sims, ITC_threshold)
-        print(f'after ITC filtering: {len(captions)}')
+        sims = blip_rank(device0, blip_ranking_model, raw_image, captions2, mode='itc')
+        captions3, scores3 = filter_captions(captions2, sims, ITC_threshold)
+        print(f'after ITC filtering: {len(captions3)}')
 
+        itc_scores = scores3
+        clipl_scores = [scores0[captions0.index(c)] for c in captions3]
+
+        captions = captions2
         print('synth: ', captions)
         print('human: ', caption)
 
@@ -191,6 +199,8 @@ def main():
                 'original_file_name': str(f),
                 'ground_truth': caption,
                 'synth_captions': captions,
+                'synth_captions_scores_itc': itc_scores,
+                'synth_captions_scores_clipl': clipl_scores,
                 'image_size': [w, h]
             }
         )
@@ -200,10 +210,8 @@ def main():
         'captions': priv
     } 
 
-
     with open(output_folder_path / args.params_json_fn, "w") as f:
         json.dump(json_data, f, indent=2)
-
 
     # generate html evaluation file
     with open(output_folder_path / 'eval.html', 'w') as f:
@@ -217,10 +225,17 @@ def main():
             fn = entry['file_name']
             gt = entry['ground_truth']
             captions = entry['synth_captions']
+            itc_scores = entry['synth_captions_scores_itc']
+            clipl_scores = entry['synth_captions_scores_clipl']
+            
             print(f'<li><p><img src="{fn}" alt="{caption}" /><br />', file=f)
             print('<ul>',file=f)
-            for c in captions[:25]:
-                print(f'<li>{c}</li>', file=f)
+            for i,c in enumerate(captions[:25]):
+                print(f'<li>[{itc_scores[i]:.3f}; {clipl_scores[i]:.3f}] {c}</li>', file=f)
+            
+            best_clipl_index = np.argmax(np.asarray(clipl_scores))
+            
+            print(f'Highest CLIP ViT-L: [{clipl_scores[best_clipl_index]:.3f}] {captions[best_clipl_index]}', file=f)
             print(f'</ul>Ground truth: {gt}</p>', file=f)
         print('</ul></body></html>', file=f)
 
