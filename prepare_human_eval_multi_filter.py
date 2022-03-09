@@ -30,8 +30,6 @@ def parse_args():
     parser.add_argument('--force_eos_prob', default=0.9, type=float)
     parser.add_argument('--num_sampling_runs', default=1, type=int)
 
-    parser.add_argument('--mode', default='CLIP-ViT-L+RN50x64', type=str)   # CLIP-ViT-L+RN50x64, CLIP-ViT-L, CLIP-RN50x64
-
     parser.add_argument('--deviceA_index', default=0, type=int)
     parser.add_argument('--deviceB_index', default=1, type=int)
 
@@ -66,8 +64,6 @@ def main():
     device1 = torch.device('cuda', args.deviceB_index)
 
     model,transform = load_blip_decoder(device1)
-
-    mode = args.mode
 
     clip_model_name1 = "ViT-L/14"
     clip_model_name2 = "RN50x64"
