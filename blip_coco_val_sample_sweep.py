@@ -6,6 +6,7 @@ import random
 from typing import Dict
 import numpy as np
 import torch
+import wandb
 
 import clip
 from create_dataset import CocoJsonDataset
@@ -16,21 +17,29 @@ from sampling import blip_rank, clip_rank, load_blip_decoder, load_blip_ranking_
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--manual_seed', default=42, type=int, help='initialization of pseudo-RNG')
-    parser.add_argument('--valid_json_path', default='/data/datasets/coco/annotations/captions_val2017.json', type=str)
-    parser.add_argument('--image_folder_path', default='/data/datasets/coco/val2017/', type=str)
+    parser.add_argument('--manual_seed', default=958137723, type=int, help='initialization of pseudo-RNG')
+    parser.add_argument('--valid_json_path', default='/mnt/datasets/coco/annotations/captions_val2017.json', type=str)
+    parser.add_argument('--image_folder_path', default='/mnt/datasets/coco/val2017/', type=str)
     parser.add_argument('--n', default=100, type=int)
-    parser.add_argument('--batch_size', default=64, type=int)
+    
     parser.add_argument('--num_sampling_runs', default=1, type=int)
-    parser.add_argument('--max_len', default=64, type=int)
-    parser.add_argument('--torch_hub_dir', default='/mnt/sdb3/torch_hub', type=str)
+    parser.add_argument('--min_len', default=5, type=int)
+    parser.add_argument('--max_len', default=65, type=int)
+    parser.add_argument('--top_k', default=2500, type=int)
+    parser.add_argument('--top_p', default=0.5, type=float)
+    parser.add_argument('--force_eos_prob', default=1.0, type=float)
+    parser.add_argument('--batch_size', default=64, type=int)
+
+    parser.add_argument('--torch_hub_dir', default='/mnt/torch_hub', type=str)
     parser.add_argument('--mode', default='ITC', type=str)   # CLIP-ViT-L+RN50x64, CLIP-ViT-L, CLIP-RN50x64, ITC, ITM
   
     parser.add_argument('--deviceA_index', default=0, type=int)
-    parser.add_argument('--deviceB_index', default=1, type=int)
+    parser.add_argument('--deviceB_index', default=0, type=int)
 
     opt = parser.parse_args()
     return opt
+
+    # local run --deviceA_index 0 --deviceB_index 1 --torch_hub_dir /mnt/sdb3/torch_hub --valid_json_path /data/datasets/coco/annotations/captions_val2017.json --image_folder_path /data/datasets/coco/val2017/
 
 
 class RankingModel:
@@ -82,6 +91,8 @@ class RankingModel:
 def main():
     args = parse_args()
 
+    wandb.init(project='blip_coco_sweep', config=vars(args))    # args will be ignored during sweep
+
     seed = args.manual_seed
     torch.manual_seed(seed)
     random.seed(seed)
@@ -109,18 +120,18 @@ def main():
     model,transform = load_blip_decoder(device1)
     ranking = RankingModel(args.mode, device0, device1)
 
-    min_len = 5
-    max_len = 45
-    top_k = 2500
-    top_p = 0.5
-    force_eos_prob = 1.0
-    batch_size = 40
+    min_len = args.min_len
+    max_len = args.max_len
+    top_k = args.top_k
+    top_p = args.top_p
+    force_eos_prob = args.force_eos_prob
+    batch_size = args.batch_size
 
     top_p = torch.tensor([top_p] * batch_size, device=device1)
     min_len = torch.tensor(([min_len] * batch_size), device=device1)
     max_len = torch.tensor(([max_len] * batch_size), device=device1)
 
-
+    sampler_hypo = {}
     image_folder_path = Path(args.image_folder_path)
     for i,id in enumerate(image_ids):
         image = val_annotations.image_by_id[id]
@@ -141,10 +152,13 @@ def main():
             force_eos_log_prob=math.log(force_eos_prob),
             prompt='a picture of ',
             num_runs=args.num_sampling_runs)
-
+        
         synth_caption = ranking.rank(raw_image, captions)
+        sampler_hypo[id] = [{'caption': synth_caption}]
         print(synth_caption)
-
+    
+    scores, img_scores = generate_scores(ground_truth_captions, sampler_hypo)
+    wandb.log(scores)
 
 
 if __name__ == '__main__':
