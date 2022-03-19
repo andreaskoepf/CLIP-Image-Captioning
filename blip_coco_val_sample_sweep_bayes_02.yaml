@@ -1,0 +1,29 @@
+program: blip_coco_val_sample_sweep.py
+method: bayes
+project: blip_coco_val_sample_sweep_bayes_02
+metric:
+  goal: maximize
+  name: Bleu_4
+parameters:
+  min_len:
+    distribution: int_uniform
+    min: 5
+    max: 60
+  top_k:
+    distribution: int_uniform
+    min: 100
+    max: 10000
+  top_p:
+    distribution: uniform
+    min: 0.01
+    max: 1.0
+  force_eos_prob:
+    distribution: uniform
+    min: 0.1
+    max: 1.0
+  batch_size:
+    distribution: int_uniform
+    min: 1
+    max: 256
+  mode:
+    values: ['ITC', 'CLIP-ViT-L', 'CLIP-RN50x64', 'CLIP-ViT-L+RN50x64']
