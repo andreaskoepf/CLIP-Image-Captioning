@@ -3,7 +3,7 @@ method: bayes
 project: blip_coco_val_sample_sweep_bayes_01
 metric:
   goal: maximize
-  name: Blue_4
+  name: Bleu_4
 parameters:
   min_len:
     distribution: int_uniform
