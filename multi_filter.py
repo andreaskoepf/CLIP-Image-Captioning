@@ -27,6 +27,7 @@ def parse_args():
     parser.add_argument('--output_folder', default='multi_filter', type=str)
     parser.add_argument('--params_json_fn', default='params.json', type=str)
     parser.add_argument('--top_k', default=2500, type=int)
+    parser.add_argument('--typ_p', default=0, type=float)
     parser.add_argument('--force_eos_prob', default=0.9, type=float)
     parser.add_argument('--num_sampling_runs', default=1, type=int)
 
@@ -38,6 +39,8 @@ def parse_args():
     parser.add_argument('--set_max_len', default=None, type=int)
     parser.add_argument('--set_min_len', default=None, type=int)
     parser.add_argument('--set_top_p', default=None, type=float)
+
+    parser.add_argument('--torch_hub', default=None, type=str)
 
     opt = parser.parse_args()
     return opt
@@ -60,7 +63,8 @@ def main():
 
     random.seed(seed)
 
-    torch.hub.set_dir('/mnt/sdb3/torch_hub')
+    if args.torch_hub is not None:
+        torch.hub.set_dir(args.torch_hub)   # --torch_hub /media/koepf/data2/torch_hub
 
     device0 = torch.device('cuda', args.deviceA_index)
     device1 = torch.device('cuda', args.deviceB_index)
@@ -89,6 +93,7 @@ def main():
     image_folder_path = Path(args.image_folder_path)
 
     top_k = args.top_k
+    typ_p = args.typ_p
 
     output_image_folder_name = 'images'
 
@@ -143,6 +148,7 @@ def main():
             sample_count=min_len.size(0),
             top_p=top_p,
             top_k=top_k,
+            typ_p=typ_p,
             min_len=min_len,
             max_len=max_len,
             force_eos_log_prob=math.log(args.force_eos_prob),
