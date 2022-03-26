@@ -69,6 +69,41 @@ def repetition_penalty_apply(logits, tokens, penalty):
     return logits
 
 
+def typical_filtering(logits, typ_p=0.25, filter_value=float('-inf')):
+    """
+    Typical Decoding for Natural Language Generation, Meister et al.
+    https://arxiv.org/abs/2202.00666
+    """
+    if type(typ_p) == float and typ_p > 0.0 or (type(typ_p) == torch.Tensor and torch.any(typ_p > 0)):
+        if type(typ_p) == torch.Tensor and typ_p.size(-1) != 1:
+            typ_p = typ_p.unsqueeze(-1)
+
+        normalized = F.log_softmax(logits, dim=-1)
+        p = normalized.exp()
+        entropy = -torch.sum(normalized * p, dim=-1, keepdim=True)
+        shifted_scores = torch.abs(normalized + entropy)
+        
+        # sort ascending (bottom-p)
+        _, sorted_indices = torch.sort(shifted_scores, descending=False, dim=-1)
+        sorted_p = p.gather(dim=-1, index=sorted_indices)
+        cumulative_probs = torch.cumsum(sorted_p, dim=-1)
+ 
+        # Remove tokens with cumulative probability above the threshold
+        sorted_indices_to_remove = cumulative_probs > typ_p
+        # Shift the indices to the right to keep also the first token above the threshold
+        sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+        sorted_indices_to_remove[:, 0] = False
+        
+        # convert sorted indices into flat indices
+        row_starts = torch.arange(sorted_indices.shape[0], device=sorted_indices.device).unsqueeze(1) * sorted_indices.shape[1]
+        sorted_indices_flat = sorted_indices + row_starts
+        indices_to_remove = sorted_indices_flat[sorted_indices_to_remove]
+        logits = logits.contiguous()
+        logits.view(-1)[indices_to_remove] = filter_value
+
+    return logits
+
+
 def top_k_top_p_filtering_batch(logits, top_k=0, top_p=0.0, filter_value=float('-inf')):
     """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
         Args:
@@ -132,6 +167,7 @@ def generate(
     eos_token_id,
     top_p,
     top_k,
+    typ_p,
     min_length,
     max_length,
     repetition_penalty: Optional[float] = None,
@@ -169,6 +205,7 @@ def generate(
             repetition_penalty_apply(last_token_logits, tokens=inputs, penalty=repetition_penalty)
 
         last_token_logits = top_k_top_p_filtering_batch(last_token_logits, top_p=top_p, top_k=top_k)
+        last_token_logits = typical_filtering(last_token_logits, typ_p=typ_p)
         p = F.softmax(last_token_logits, dim=-1)
 
         # 1. record probabilities of EOS token
@@ -218,6 +255,8 @@ def generate(
                 top_p = top_p[not_completed]
             if type(top_k) == torch.Tensor: 
                 top_k = top_k[not_completed]
+            if type(typ_p) == torch.Tensor: 
+                typ_p = typ_p[not_completed]
             min_length = min_length[not_completed]
             max_length = max_length[not_completed]
             encoder_hidden_states = encoder_hidden_states[not_completed]
@@ -236,7 +275,7 @@ def generate(
 
 
 @torch.no_grad()
-def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_len=0, repetition_penalty=1.3, force_eos_log_prob=math.log(0.9), prompt='a picture of ', unique=True, num_runs=1):
+def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, typ_p=0, min_len=0, max_len=0, repetition_penalty=1.3, force_eos_log_prob=math.log(0.9), prompt='a picture of ', unique=True, num_runs=1):
     batch_size = image.size(0)
     device = image.device
     image_embeds = blip_model.visual_encoder(image)
@@ -253,13 +292,14 @@ def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, min_len=0, max_l
     input_ids = input_ids[:, :-1]   # remove end token
     input_ids = input_ids.repeat_interleave(sample_count, dim=0)
     num_prompt_tokens = input_ids.size(1)
-
+    
     outputs = []
     for i in range(num_runs):
         outputs = outputs + generate(blip_model.text_decoder, input_ids, image_embeds, image_atts, 
             eos_token_id=eos_token_id,
             top_p=top_p,
             top_k=top_k,
+            typ_p=typ_p,
             min_length=min_len,
             max_length=max_len,
             repetition_penalty=repetition_penalty,
@@ -308,7 +348,7 @@ def load_blip_ranking_model(device, image_size=384):
 
 def main():
     #torch.hub.set_dir('/data/torch_hub')
-    torch.hub.set_dir('/mnt/sdb3/torch_hub')
+    torch.hub.set_dir('/media/koepf/data2/torch_hub')
 
     device = torch.device('cuda', 1)
     device0 = torch.device('cuda', 0)
@@ -347,6 +387,7 @@ def main():
         #top_p = 0.3
         
         top_p = torch.tensor(([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]*5), device=device)
+        typ_p = torch.tensor(([0.5]*40), device=device)
         #top_p = torch.tensor([0.3]*40, device=device)
         min_len = torch.tensor(([5]*8 + [10]*8 + [15]*8 + [20]*8 + [30]*8), device=device)
         #max_len = torch.tensor(([20]*8 + [30]*8 + [30]*8 + [45]*8 + [45]*8), device=device)
@@ -368,6 +409,7 @@ def main():
             sample_count=min_len.size(0),
             top_p=top_p,
             top_k=top_k,
+            typ_p=typ_p,
             min_len=min_len,
             max_len=max_len,
             force_eos_log_prob=math.log(0.9),

@@ -17,10 +17,11 @@ def parse_args():
     parser.add_argument('--print_top_n', default=5, type=int)
     
     parser.add_argument('--top_k', default=2500, type=int)
+    parser.add_argument('--typ_p', default=0, type=float)
     parser.add_argument('--force_eos_prob', default=0.9, type=float)
     parser.add_argument('--num_sampling_runs', default=1, type=int)
 
-    parser.add_argument('--mode', default='ITC', type=str)   # CLIP-ViT-L+RN50x64, CLIP-ViT-L, CLIP-RN50x64
+    parser.add_argument('--mode', default='CLIP-ViT-L+RN50x64', type=str)   # CLIP-ViT-L+RN50x64, CLIP-ViT-L, CLIP-RN50x64, ITC
 
     parser.add_argument('--deviceA_index', default=0, type=int)
     parser.add_argument('--deviceB_index', default=1, type=int)
@@ -28,6 +29,7 @@ def parse_args():
     parser.add_argument('--set_max_len', default=None, type=int)
     parser.add_argument('--set_min_len', default=None, type=int)
     parser.add_argument('--set_top_p', default=None, type=float)
+    parser.add_argument('--torch_hub', default=None, type=str)
 
     opt = parser.parse_args()
     return opt
@@ -41,7 +43,8 @@ def main():
 
     random.seed(seed)
 
-    torch.hub.set_dir('/mnt/sdb3/torch_hub')
+    if args.torch_hub is not None:
+        torch.hub.set_dir(args.torch_hub)   # --torch_hub /media/koepf/data2/torch_hub
 
     device0 = torch.device('cuda', args.deviceA_index)
     device1 = torch.device('cuda', args.deviceB_index)
@@ -90,7 +93,8 @@ def main():
         max_len = torch.tensor(([args.set_max_len]*40), device=device1)
     else:
         max_len = torch.tensor(([20]*8 + [30]*8 + [30]*8 + [45]*8 + [45]*8), device=device1)
-    
+
+    typ_p = args.typ_p
     top_k = args.top_k
 
     captions,_,_ = sample(
@@ -99,6 +103,7 @@ def main():
             sample_count=min_len.size(0),
             top_p=top_p,
             top_k=top_k,
+            typ_p=typ_p,
             min_len=min_len,
             max_len=max_len,
             force_eos_log_prob=math.log(args.force_eos_prob),
