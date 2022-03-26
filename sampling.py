@@ -139,7 +139,7 @@ def top_k_top_p_filtering_batch(logits, top_k=0, top_p=0.0, filter_value=float('
             cutoff = torch.topk(logits[i], k=k, largest=True).values[-1]
             indices_to_remove = logits[i] < cutoff
             logits[i][indices_to_remove] = filter_value
-    if type(top_p) == float and top_p > 0.0 or torch.any(top_p > 0):
+    if type(top_p) == float and top_p > 0.0 or (type(top_p) == torch.Tensor and torch.any(top_p > 0)):
         if type(top_p) == torch.Tensor and top_p.size(-1) != 1:
             top_p = top_p.unsqueeze(-1)
         sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
@@ -292,7 +292,7 @@ def sample(image, blip_model, sample_count=3, top_p=0, top_k=0, typ_p=0, min_len
     input_ids = input_ids[:, :-1]   # remove end token
     input_ids = input_ids.repeat_interleave(sample_count, dim=0)
     num_prompt_tokens = input_ids.size(1)
-    
+
     outputs = []
     for i in range(num_runs):
         outputs = outputs + generate(blip_model.text_decoder, input_ids, image_embeds, image_atts, 
@@ -374,7 +374,6 @@ def main():
         if count > 100:
             break
 
-        
         #print(f'Image file: ', f)
         raw_image = Image.open(f).convert('RGB')   
         w,h = raw_image.size
@@ -382,12 +381,16 @@ def main():
         image = transform(raw_image).unsqueeze(0).to(device)     
     
         #top_k = 5000
-        top_k = 2500
+        #top_k = 2500
         #top_k = 500
         #top_p = 0.3
         
-        top_p = torch.tensor(([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]*5), device=device)
-        typ_p = torch.tensor(([0.5]*40), device=device)
+        top_k = 0
+        top_p = torch.tensor([0]*40, device=device)
+        typ_p = 0.25
+
+        #top_p = torch.tensor(([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]*5), device=device)
+
         #top_p = torch.tensor([0.3]*40, device=device)
         min_len = torch.tensor(([5]*8 + [10]*8 + [15]*8 + [20]*8 + [30]*8), device=device)
         #max_len = torch.tensor(([20]*8 + [30]*8 + [30]*8 + [45]*8 + [45]*8), device=device)
