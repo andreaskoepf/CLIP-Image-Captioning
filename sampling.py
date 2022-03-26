@@ -69,7 +69,7 @@ def repetition_penalty_apply(logits, tokens, penalty):
     return logits
 
 
-def typical_filtering(logits, typ_p=0.25, filter_value=float('-inf')):
+def typical_filtering(logits, typ_p=0.25, min_tokens_to_keep=1, filter_value=float('-inf')):
     """
     Typical Decoding for Natural Language Generation, Meister et al.
     https://arxiv.org/abs/2202.00666
@@ -80,26 +80,24 @@ def typical_filtering(logits, typ_p=0.25, filter_value=float('-inf')):
 
         normalized = F.log_softmax(logits, dim=-1)
         p = normalized.exp()
-        entropy = -torch.sum(normalized * p, dim=-1, keepdim=True)
+
+        entropy = -torch.nansum(normalized * p, dim=-1, keepdim=True)
         shifted_scores = torch.abs(normalized + entropy)
         
         # sort ascending (bottom-p)
-        _, sorted_indices = torch.sort(shifted_scores, descending=False, dim=-1)
+        sorted_scores, sorted_indices = torch.sort(shifted_scores, descending=False, dim=-1)
         sorted_p = p.gather(dim=-1, index=sorted_indices)
         cumulative_probs = torch.cumsum(sorted_p, dim=-1)
- 
+    
         # Remove tokens with cumulative probability above the threshold
-        sorted_indices_to_remove = cumulative_probs > typ_p
-        # Shift the indices to the right to keep also the first token above the threshold
-        sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-        sorted_indices_to_remove[:, 0] = False
-        
-        # convert sorted indices into flat indices
-        row_starts = torch.arange(sorted_indices.shape[0], device=sorted_indices.device).unsqueeze(1) * sorted_indices.shape[1]
-        sorted_indices_flat = sorted_indices + row_starts
-        indices_to_remove = sorted_indices_flat[sorted_indices_to_remove]
-        logits = logits.contiguous()
-        logits.view(-1)[indices_to_remove] = filter_value
+        last_ind = torch.sum(cumulative_probs < typ_p, dim=-1, keepdim=True)
+        sorted_indices_to_remove = sorted_scores > sorted_scores.gather(dim=-1, index=last_ind)
+        if min_tokens_to_keep > 1:
+            # Keep at least min_tokens_to_keep
+            sorted_indices_to_remove[:, :min_tokens_to_keep] = False
+
+        indices_to_remove = sorted_indices_to_remove.scatter(dim=-1, index=sorted_indices, src=sorted_indices_to_remove)
+        logits = logits.masked_fill(indices_to_remove, filter_value)
 
     return logits
 
@@ -385,9 +383,11 @@ def main():
         #top_k = 500
         #top_p = 0.3
         
-        top_k = 0
-        top_p = torch.tensor([0]*40, device=device)
-        typ_p = 0.25
+        top_k = 10000
+        #top_p = torch.tensor([0.4]*40, device=device)
+        top_p = torch.tensor([0.9]*40, device=device)
+        typ_p = 0.8
+        num_runs = 1
 
         #top_p = torch.tensor(([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]*5), device=device)
 
@@ -417,7 +417,7 @@ def main():
             max_len=max_len,
             force_eos_log_prob=math.log(0.9),
             prompt='a picture of ',
-            num_runs=10)
+            num_runs=num_runs)
         
         #longest_caption = max(captions, key=lambda x: len(x))
         #print(f'longest caption (of {len(captions)}): {longest_caption}')
