@@ -147,12 +147,9 @@ def top_k_top_p_filtering_batch(logits, top_k=0, top_p=0.0, filter_value=float('
         # Shift the indices to the right to keep also the first token above the threshold
         sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
         sorted_indices_to_remove[:, 0] = False
-        # convert sorted indices into flat indices
-        row_starts = torch.arange(sorted_indices.shape[0], device=device).unsqueeze(1) * sorted_indices.shape[1]
-        sorted_indices_flat = sorted_indices + row_starts
-        indices_to_remove = sorted_indices_flat[sorted_indices_to_remove]
-        logits = logits.contiguous()
-        logits.view(-1)[indices_to_remove] = filter_value
+        indices_to_remove = sorted_indices_to_remove.scatter(dim=-1, index=sorted_indices, src=sorted_indices_to_remove)
+        logits = logits.masked_fill(indices_to_remove, filter_value)
+
     return logits
 
 
