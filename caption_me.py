@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument('--force_eos_prob', default=0.9, type=float)
     parser.add_argument('--num_sampling_runs', default=1, type=int)
 
-    parser.add_argument('--mode', default='CLIP-ViT-L+RN50x64', type=str)   # CLIP-ViT-L+RN50x64, CLIP-ViT-L, CLIP-RN50x64, ITC
+    parser.add_argument('--mode', default='CLIP-ViT-L', type=str)   # CLIP-ViT-L+RN50x64, CLIP-ViT-L, CLIP-RN50x64, ITC
 
     parser.add_argument('--deviceA_index', default=0, type=int)
     parser.add_argument('--deviceB_index', default=1, type=int)
@@ -110,13 +110,15 @@ def main():
             prompt='a picture of ',
             num_runs=args.num_sampling_runs)
 
-    # if mode == 'CLIP-ViT-L+RN50x64':
-    #     sims = clip_rank(device1, clip_model1, clip_preprocess1, raw_image, captions)
-    #     top_indices = np.argsort(np.asarray(sims))[-5:][::-1]
-    #     best_captions = [captions[i] for i in top_indices]
-    #     sims2 = clip_rank(device0, clip_model2, clip_preprocess2, raw_image, best_captions)
-    #     best_index = np.argmax(np.asarray(sims2))
-    if mode == 'CLIP-ViT-L' or mode == 'CLIP-RN50x64':
+    best_captions = captions
+    if mode == 'CLIP-ViT-L+RN50x64':
+        sims1 = clip_rank(device1, clip_model1, clip_preprocess1, raw_image, captions)
+        top_indices = np.argsort(np.asarray(sims1))[-5:][::-1]
+        best_captions = [captions[i] for i in top_indices]
+        sims2 = clip_rank(device0, clip_model2, clip_preprocess2, raw_image, best_captions)
+        best_index = np.argmax(np.asarray(sims2))
+        sims = sims2
+    elif mode == 'CLIP-ViT-L' or mode == 'CLIP-RN50x64':
         sims = clip_rank(device1, clip_model1, clip_preprocess1, raw_image, captions)
         best_index = np.argmax(np.asarray(sims))
     elif mode == 'ITC' or mode == 'ITM':
@@ -129,7 +131,7 @@ def main():
     top_n = args.print_top_n
     top_indices = np.argsort(np.asarray(sims))[-top_n:][::-1]
     for i, j in enumerate(top_indices):
-        print(f'{i} [{sims[j]:.4f}]: {captions[j]}')
+        print(f'{i} [{sims[j]:.4f}]: {best_captions[j]}')
 
 
 if __name__ == '__main__':
