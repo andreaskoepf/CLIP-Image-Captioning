@@ -102,6 +102,15 @@ def typical_filtering(logits, typ_p=0.25, min_tokens_to_keep=1, filter_value=flo
     return logits
 
 
+def typical_logit_transform(logits, scaling=1):
+    """experimental: use negative absolute distance to entropy as logits replacement"""
+    normalized = F.log_softmax(logits, dim=-1)
+    p = normalized.exp()
+    entropy = -torch.nansum(normalized * p, dim=-1, keepdim=True)
+    shifted_scores = torch.abs(normalized + entropy)
+    return -shifted_scores * scaling
+
+
 def top_k_top_p_filtering_batch(logits, top_k=0, top_p=0.0, filter_value=float('-inf')):
     """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
         Args:
@@ -199,6 +208,7 @@ def generate(
         if repetition_penalty is not None and repetition_penalty > 0:
             repetition_penalty_apply(last_token_logits, tokens=inputs, penalty=repetition_penalty)
 
+        #last_token_logits = typical_logit_transform(last_token_logits, 1.0/typ_p)
         last_token_logits = top_k_top_p_filtering_batch(last_token_logits, top_p=top_p, top_k=top_k)
         last_token_logits = typical_filtering(last_token_logits, typ_p=typ_p)
         p = F.softmax(last_token_logits, dim=-1)
@@ -382,7 +392,7 @@ def main():
         
         top_k = 10000
         #top_p = torch.tensor([0.4]*40, device=device)
-        top_p = torch.tensor([0.9]*40, device=device)
+        top_p = torch.tensor([1.0]*40, device=device)
         typ_p = 0.8
         num_runs = 1
 
